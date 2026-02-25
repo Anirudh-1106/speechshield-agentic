@@ -1,0 +1,32 @@
+# ---------- Audio output ----------
+audio/*.mp3
+
+# ---------- Python / venv ----------
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ---------- Models cache ----------
+models/
+
+# ---------- Logs ----------
+logs/
+
+# ---------- IDE ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ---------- OS ----------
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ---------- Pytest ----------
+.pytest_cache/
