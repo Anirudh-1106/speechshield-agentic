@@ -13,18 +13,28 @@ import signal
 import sys
 
 # ---------------------------------------------------------------------------
-# Logging setup — file + console
+# Load configuration early
 # ---------------------------------------------------------------------------
-LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
+from config.settings import settings
+
+config = settings()
+
+# ---------------------------------------------------------------------------
+# Logging setup — file + console (configurable)
+# ---------------------------------------------------------------------------
+LOG_DIR = os.path.join(os.path.dirname(__file__), config.logging.log_dir)
 os.makedirs(LOG_DIR, exist_ok=True)
 
+handlers = [logging.StreamHandler(sys.stdout)]
+if config.logging.enable_file_logging:
+    handlers.append(
+        logging.FileHandler(os.path.join(LOG_DIR, "speechshield.log"), encoding="utf-8")
+    )
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, config.logging.level),
     format="%(asctime)s [%(name)-16s] %(levelname)-7s %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(os.path.join(LOG_DIR, "speechshield.log"), encoding="utf-8"),
-    ],
+    handlers=handlers,
 )
 logger = logging.getLogger("Main")
 
@@ -43,20 +53,21 @@ from agents.orchestrator import OrchestratorAgent
 
 
 async def main() -> None:
-    logger.info("=" * 60)
-    logger.info("  SpeechShield Agentic — starting up")
-    logger.info("=" * 60)
+    logger.info("=" * 70)
+    logger.info("  SpeechShield Agentic v2 — starting up")
+    logger.info("=" * 70)
+    logger.info("Configuration: env=%s debug=%s", config.env, config.debug)
 
     # --- Core infrastructure ---
     bus = EventBus()
-    state = GlobalState()
+    state = GlobalState(settings=config)
 
     # --- Instantiate agents ---
     audio_agent = AudioAgent(bus, state)
     asr_agent = ASRAgent(bus, state)
     toxicity_agent = ToxicityAgent(bus, state)
     rewrite_agent = RewriteAgent(bus, state)
-    voice_agent = VoiceAgent(bus, state, play_audio=True)
+    voice_agent = VoiceAgent(bus, state, play_audio=config.voice.play_audio)
     orchestrator = OrchestratorAgent(bus, state)
 
     agents = [audio_agent, asr_agent, toxicity_agent, rewrite_agent, voice_agent, orchestrator]
@@ -85,6 +96,7 @@ async def main() -> None:
     async def _dashboard_writer() -> None:
         """Periodically write GlobalState snapshot to JSON for the Streamlit dashboard."""
         dash_path = os.path.join(LOG_DIR, "dashboard_state.json")
+        refresh_interval = config.dashboard.refresh_interval
         while not shutdown_event.is_set():
             try:
                 snapshot = state.get_dashboard_snapshot()
@@ -92,7 +104,7 @@ async def main() -> None:
                     json.dump(snapshot, f, ensure_ascii=False)
             except Exception as exc:
                 logger.debug("Dashboard write error: %s", exc)
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(refresh_interval)
 
     tasks = [
         asyncio.create_task(bus.start(), name="EventBus"),

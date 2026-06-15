@@ -1,0 +1,34 @@
+# Production Configuration
+# Optimized for reliability, performance, and minimal latency
+
+env: prod
+debug: false
+
+audio:
+  chunk_size: 2048  # Larger chunks for better throughput
+
+asr:
+  model_size: base  # Faster, more optimized for production
+  timeout_seconds: 15.0  # Stricter timeout
+
+toxicity:
+  threshold: 0.6  # Higher threshold to reduce false positives
+  timeout_seconds: 3.0  # Strict timeout
+
+rewrite:
+  timeout_seconds: 8.0
+  max_retries: 1  # Limited retries in production
+
+pipeline:
+  latency_budget_ms: 300.0  # Strict latency target
+  default_rewrite_strictness: 1.2  # Slightly stricter rewrites
+  graceful_shutdown_timeout: 15.0
+
+logging:
+  level: WARNING
+  format: json  # Structured logging for log aggregation
+  enable_file_logging: true
+
+dashboard:
+  refresh_interval: 2.0  # Less frequent updates to reduce load
+  max_rows: 1000

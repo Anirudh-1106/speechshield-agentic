@@ -28,5 +28,9 @@ pandas>=2.2.0
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
 
+# Configuration Management
+pydantic>=2.0.0
+PyYAML>=6.0
+
 # Utilities
 numpy>=1.26.0

@@ -1,0 +1,57 @@
+# Default SpeechShield Configuration
+# All values are overridable via environment variables (SPEECHSHIELD_*)
+# or environment-specific YAML files.
+
+env: dev
+debug: false
+
+audio:
+  sample_rate: 16000
+  channels: 1
+  chunk_size: 1024
+  input_device: null
+  output_device: null
+  queue_size: 200
+
+asr:
+  model_size: small
+  model_dir: models/
+  timeout_seconds: 30.0
+
+toxicity:
+  model_name: models/toxic-bert
+  threshold: 0.5
+  timeout_seconds: 5.0
+
+rewrite:
+  llm_provider: ollama
+  ollama_base_url: http://localhost:11434
+  model: gemma:1b
+  timeout_seconds: 10.0
+  max_retries: 2
+  fallback_enabled: true
+
+voice:
+  provider: edge_tts
+  voice: en-US-GuyNeural
+  timeout_seconds: 15.0
+  play_audio: true
+  virtual_device_support: false
+
+pipeline:
+  latency_budget_ms: 500.0
+  default_rewrite_strictness: 1.0
+  latency_window_size: 100
+  graceful_shutdown_timeout: 10.0
+
+logging:
+  level: INFO
+  log_dir: logs/
+  format: text
+  enable_file_logging: true
+
+dashboard:
+  enabled: true
+  port: 8501
+  refresh_interval: 1.0
+  max_rows: 500

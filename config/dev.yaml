@@ -1,0 +1,30 @@
+# Development Configuration
+# Inherits from default.yaml and overrides for development workflow
+
+env: dev
+debug: true
+
+audio:
+  chunk_size: 512  # Smaller chunks for faster feedback during development
+
+asr:
+  timeout_seconds: 60.0  # More lenient in dev
+
+toxicity:
+  timeout_seconds: 10.0
+
+rewrite:
+  timeout_seconds: 20.0
+  max_retries: 3
+
+pipeline:
+  latency_budget_ms: 1000.0  # Relaxed during development
+  graceful_shutdown_timeout: 5.0
+
+logging:
+  level: DEBUG
+  format: text
+  enable_file_logging: true
+
+dashboard:
+  refresh_interval: 0.5  # More responsive during dev

@@ -9,6 +9,10 @@ Thread-safe through asyncio (single-threaded concurrency).
 import time
 import logging
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from config.settings import Settings
 
 logger = logging.getLogger("GlobalState")
 
@@ -57,22 +61,34 @@ class DashboardRow:
 class GlobalState:
     """Centralized shared state for the multi-agent system."""
 
-    def __init__(self) -> None:
+    def __init__(self, settings: "Settings | None" = None) -> None:
+        """
+        Initialize global state.
+
+        Args:
+            settings: Configuration settings object. If None, loads from environment.
+        """
+        # Load settings if not provided
+        if settings is None:
+            from config.settings import settings as load_settings
+            settings = load_settings()
+        self.settings = settings
+
         # Speaker toxicity profiles (keyed by speaker id / "default")
         self.speakers: dict[str, SpeakerProfile] = {}
 
         # Latency tracking — rolling window of last N pipeline passes
         self._latency_window: list[LatencyRecord] = []
-        self._max_latency_records: int = 100
+        self._max_latency_records: int = settings.pipeline.latency_window_size
 
-        # System configuration
+        # System configuration (legacy dict access, populated from settings)
         self.config: dict = {
-            "latency_budget_ms": 500.0,
-            "default_rewrite_strictness": 1.0,
-            "toxicity_threshold": 0.5,
-            "sample_rate": 16000,
-            "channels": 1,
-            "chunk_size": 1024,
+            "latency_budget_ms": settings.pipeline.latency_budget_ms,
+            "default_rewrite_strictness": settings.pipeline.default_rewrite_strictness,
+            "toxicity_threshold": settings.toxicity.threshold,
+            "sample_rate": settings.audio.sample_rate,
+            "channels": settings.audio.channels,
+            "chunk_size": settings.audio.chunk_size,
         }
 
         # Pipeline pass counter
@@ -80,7 +96,14 @@ class GlobalState:
 
         # Dashboard feed — recent pipeline results (capped)
         self.dashboard_log: list[DashboardRow] = []
-        self._max_dashboard_rows: int = 500
+        self._max_dashboard_rows: int = settings.dashboard.max_rows
+
+        logger.info(
+            "GlobalState initialized with settings env=%s latency_budget_ms=%.0f threshold=%.2f",
+            settings.env,
+            settings.pipeline.latency_budget_ms,
+            settings.toxicity.threshold,
+        )
 
     # ------------------------------------------------------------------
     # Speaker helpers
