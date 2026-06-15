@@ -3,28 +3,37 @@ EventBus — Asyncio-based global event bus for inter-agent communication.
 
 Agents emit events and listen for events without direct coupling.
 Each event is a dict with at least a "type" key.
+Includes correlation ID support for distributed tracing.
 """
 
 import asyncio
 import logging
-from typing import Any, Callable, Coroutine
+import uuid
+from typing import Any, Callable, Coroutine, Optional
 
 logger = logging.getLogger("EventBus")
 
 
 class Event:
-    """Typed wrapper around an event payload."""
+    """Typed wrapper around an event payload with correlation tracking."""
 
-    __slots__ = ("type", "data", "timestamp")
+    __slots__ = ("type", "data", "timestamp", "correlation_id")
 
-    def __init__(self, event_type: str, data: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        event_type: str,
+        data: dict[str, Any] | None = None,
+        correlation_id: Optional[str] = None,
+    ) -> None:
         import time
         self.type: str = event_type
         self.data: dict[str, Any] = data or {}
         self.timestamp: float = time.time()
+        # Generate correlation ID if not provided, for tracing through the pipeline
+        self.correlation_id: str = correlation_id or str(uuid.uuid4())
 
     def __repr__(self) -> str:
-        return f"Event(type={self.type!r}, data_keys={list(self.data.keys())})"
+        return f"Event(type={self.type!r}, correlation_id={self.correlation_id[:8]}...)"
 
 
 # Type alias for handler coroutines

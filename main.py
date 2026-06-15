@@ -3,6 +3,12 @@ SpeechShield — Multi-Agent Real-Time Voice Moderation System
 
 Entry point: initialises the EventBus, GlobalState, all agents,
 and runs them concurrently until Ctrl-C.
+
+Features:
+  • Structured logging with correlation IDs
+  • Prometheus metrics collection
+  • Health checks and monitoring
+  • Full async/await architecture
 """
 
 import asyncio
@@ -20,29 +26,25 @@ from config.settings import settings
 config = settings()
 
 # ---------------------------------------------------------------------------
-# Logging setup — file + console (configurable)
+# Structured logging setup (using structlog + config)
 # ---------------------------------------------------------------------------
-LOG_DIR = os.path.join(os.path.dirname(__file__), config.logging.log_dir)
-os.makedirs(LOG_DIR, exist_ok=True)
+from core.logging import configure_logging, get_logger
 
-handlers = [logging.StreamHandler(sys.stdout)]
-if config.logging.enable_file_logging:
-    handlers.append(
-        logging.FileHandler(os.path.join(LOG_DIR, "speechshield.log"), encoding="utf-8")
-    )
-
-logging.basicConfig(
-    level=getattr(logging, config.logging.level),
-    format="%(asctime)s [%(name)-16s] %(levelname)-7s %(message)s",
-    handlers=handlers,
+configure_logging(
+    level=config.logging.level,
+    format=config.logging.format,
+    log_dir=config.logging.log_dir,
+    enable_file_logging=config.logging.enable_file_logging,
 )
-logger = logging.getLogger("Main")
+logger = get_logger("Main")
 
 # ---------------------------------------------------------------------------
 # Imports
 # ---------------------------------------------------------------------------
 from core.event_bus import EventBus
 from core.state import GlobalState
+from core.health import health_checks
+from core.metrics_server import start_metrics_server
 
 from agents.audio_agent import AudioAgent
 from agents.asr_agent import ASRAgent
@@ -57,6 +59,21 @@ async def main() -> None:
     logger.info("  SpeechShield Agentic v2 — starting up")
     logger.info("=" * 70)
     logger.info("Configuration: env=%s debug=%s", config.env, config.debug)
+
+    # --- Initialize health checks ---
+    hc = health_checks()
+    hc.mark_starting("EventBus")
+    hc.mark_starting("AudioAgent")
+    hc.mark_starting("ASRAgent")
+    hc.mark_starting("ToxicityAgent")
+    hc.mark_starting("RewriteAgent")
+    hc.mark_starting("VoiceAgent")
+    hc.mark_starting("OrchestratorAgent")
+
+    # --- Start metrics server (non-blocking, background thread) ---
+    metrics_port = config.dashboard.port + 1000  # e.g., 9501 if dashboard is 8501
+    stop_metrics_server = start_metrics_server(host="127.0.0.1", port=metrics_port)
+    logger.info("Metrics server started on port %d", metrics_port)
 
     # --- Core infrastructure ---
     bus = EventBus()
@@ -81,6 +98,8 @@ async def main() -> None:
         bus.stop()
         for agent in agents:
             agent.stop()
+        hc.mark_degraded("EventBus", "shutting down")
+        stop_metrics_server()
 
     # On Windows, loop.add_signal_handler is not supported.
     # Use a background thread to watch for KeyboardInterrupt instead.
@@ -92,10 +111,13 @@ async def main() -> None:
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, _signal_handler)
 
-    # --- Launch all agents + event bus concurrently ---
+    # --- Setup dashboard writer ---
+    log_dir = os.path.join(os.path.dirname(__file__), config.logging.log_dir)
+    os.makedirs(log_dir, exist_ok=True)
+
     async def _dashboard_writer() -> None:
         """Periodically write GlobalState snapshot to JSON for the Streamlit dashboard."""
-        dash_path = os.path.join(LOG_DIR, "dashboard_state.json")
+        dash_path = os.path.join(log_dir, "dashboard_state.json")
         refresh_interval = config.dashboard.refresh_interval
         while not shutdown_event.is_set():
             try:
@@ -103,9 +125,10 @@ async def main() -> None:
                 with open(dash_path, "w", encoding="utf-8") as f:
                     json.dump(snapshot, f, ensure_ascii=False)
             except Exception as exc:
-                logger.debug("Dashboard write error: %s", exc)
+                logger.debug("Dashboard write error", error=exc)
             await asyncio.sleep(refresh_interval)
 
+    # --- Launch all agents + event bus concurrently ---
     tasks = [
         asyncio.create_task(bus.start(), name="EventBus"),
         asyncio.create_task(audio_agent.start(), name="AudioAgent"),
@@ -117,7 +140,14 @@ async def main() -> None:
         asyncio.create_task(_dashboard_writer(), name="DashboardWriter"),
     ]
 
-    logger.info("All agents launched. Press Ctrl+C to stop.")
+    logger.info("All agents launched", metric="startup_complete")
+
+    # Mark all agents as ready
+    for agent_name in ["AudioAgent", "ASRAgent", "ToxicityAgent", "RewriteAgent", "VoiceAgent", "OrchestratorAgent"]:
+        hc.mark_ready(agent_name)
+    hc.mark_ready("EventBus")
+
+    logger.info("System ready. Press Ctrl+C to stop.")
 
     try:
         await asyncio.gather(*tasks)
