@@ -5,22 +5,29 @@ Receives toxicity_result events.
 - If toxic: attempts LLM-based rewrite (Ollama) first, falls back to rules.
 - If not toxic: passes through the original text unchanged.
 Emits rewrite_result events.
+
+Metrics:
+  - speechshield_rewrite_latency_seconds — Rewrite latency
+  - speechshield_rewrite_attempts_total — Attempt count by status
+  - speechshield_rewrite_fallback_total — Fallback count by reason
 """
 
 import asyncio
-import logging
 import re
 import time
 from typing import TYPE_CHECKING
 
 from core.event_bus import Event
+from core.logging import get_logger
+from core.metrics import metrics
+from core.health import health_checks
 from agents.llm_rewriter import LLMRewriter
 
 if TYPE_CHECKING:
     from core.event_bus import EventBus
     from core.state import GlobalState
 
-logger = logging.getLogger("RewriteAgent")
+logger = get_logger("agents.rewrite_agent")
 
 # -----------------------------------------------------------------------
 # Rule-based rewrite table  (deterministic, no randomness)
@@ -143,13 +150,15 @@ class RewriteAgent:
     async def start(self) -> None:
         self._running = True
         self.bus.subscribe("toxicity_result", self._handle_toxicity)
-        logger.info("RewriteAgent started — listening for toxicity_result events.")
+        health_checks().mark_ready("RewriteAgent")
+        logger.info("rewrite_agent_started", subscribed_to="toxicity_result")
 
         while self._running:
             await asyncio.sleep(0.1)
 
     def stop(self) -> None:
         self._running = False
+        health_checks().mark_starting("RewriteAgent")
 
     # ------------------------------------------------------------------
     # Event handler
@@ -161,37 +170,87 @@ class RewriteAgent:
         speaker: str = event.data.get("speaker", "default")
         strictness: float = event.data.get("strictness", 1.0)
         rewrite_method = "passthrough"
+        m = metrics()
+        
+        start_time = time.time()
 
-        if toxic:
-            # Try LLM first (in executor — it's synchronous HTTP)
-            loop = asyncio.get_running_loop()
-            llm_result = await loop.run_in_executor(None, self._llm.rewrite, text)
+        try:
+            if toxic:
+                # Try LLM first (in executor — it's synchronous HTTP)
+                loop = asyncio.get_running_loop()
+                
+                with m.rewrite_latency_seconds.time():
+                    llm_result = await loop.run_in_executor(None, self._llm.rewrite, text)
 
-            if llm_result:
-                rewritten = llm_result
-                rewrite_method = "llm"
-                logger.info("LLM rewrite: '%s' → '%s'", text[:60], rewritten[:60])
+                if llm_result:
+                    rewritten = llm_result
+                    rewrite_method = "llm"
+                    m.rewrite_attempts_total.labels(status="success").inc()
+                    logger.info(
+                        "rewrite_llm_success",
+                        correlation_id=event.correlation_id,
+                        original_length=len(text),
+                        rewritten_length=len(rewritten),
+                    )
+                else:
+                    rewritten = self._rewrite(text, strictness)
+                    rewrite_method = "rules"
+                    m.rewrite_fallback_total.labels(reason="llm_timeout").inc()
+                    logger.info(
+                        "rewrite_fallback_to_rules",
+                        correlation_id=event.correlation_id,
+                        reason="llm_timeout",
+                        original_length=len(text),
+                    )
             else:
-                rewritten = self._rewrite(text, strictness)
-                rewrite_method = "rules"
-                logger.info("Rule rewrite: '%s' → '%s'", text[:60], rewritten[:60])
-        else:
-            rewritten = text
-            logger.debug("Pass-through (non-toxic): '%s'", text[:60])
+                rewritten = text
+                logger.debug(
+                    "rewrite_passthrough",
+                    correlation_id=event.correlation_id,
+                    text_length=len(text),
+                )
 
-        await self.bus.emit(
-            Event(
-                "rewrite_result",
-                {
-                    "original_text": text,
-                    "rewritten_text": rewritten,
-                    "was_toxic": toxic,
-                    "rewrite_method": rewrite_method,
-                    "speaker": speaker,
-                    "timestamp": time.time(),
-                },
+            elapsed = time.time() - start_time
+            logger.info(
+                "rewrite_complete",
+                correlation_id=event.correlation_id,
+                method=rewrite_method,
+                duration_ms=int(elapsed * 1000),
             )
-        )
+
+            await self.bus.emit(
+                Event(
+                    "rewrite_result",
+                    {
+                        "original_text": text,
+                        "rewritten_text": rewritten,
+                        "was_toxic": toxic,
+                        "rewrite_method": rewrite_method,
+                        "speaker": speaker,
+                        "timestamp": time.time(),
+                    },
+                    correlation_id=event.correlation_id,
+                )
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "rewrite_timeout",
+                correlation_id=event.correlation_id,
+                error="Rewrite timed out",
+                text_length=len(text),
+            )
+            m.rewrite_attempts_total.labels(status="timeout").inc()
+            health_checks().mark_error("RewriteAgent", "Rewrite timeout")
+        except Exception as e:
+            logger.error(
+                "rewrite_error",
+                correlation_id=event.correlation_id,
+                error=str(e),
+                error_type=type(e).__name__,
+                text_length=len(text),
+            )
+            m.rewrite_attempts_total.labels(status="error").inc()
+            health_checks().mark_error("RewriteAgent", f"Rewrite error: {str(e)}")
 
     # ------------------------------------------------------------------
     # Rule-based rewriting

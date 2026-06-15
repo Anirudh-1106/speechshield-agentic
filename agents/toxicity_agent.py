@@ -3,10 +3,13 @@ ToxicityAgent — Detects toxic speech using HuggingFace unitary/toxic-bert.
 
 Receives text_transcript events, classifies toxicity, and emits
 toxicity_result events with toxic flag and confidence score.
+
+Metrics:
+  - speechshield_toxicity_latency_seconds — Classification latency
+  - speechshield_toxicity_detections_total — Detections by severity
 """
 
 import asyncio
-import logging
 import re
 import time
 from typing import TYPE_CHECKING
@@ -15,12 +18,15 @@ import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from core.event_bus import Event
+from core.logging import get_logger
+from core.metrics import metrics
+from core.health import health_checks
 
 if TYPE_CHECKING:
     from core.event_bus import EventBus
     from core.state import GlobalState
 
-logger = logging.getLogger("ToxicityAgent")
+logger = get_logger("agents.toxicity_agent")
 
 MODEL_NAME = "unitary/toxic-bert"
 
@@ -105,13 +111,19 @@ class ToxicityAgent:
 
     def _load_model(self) -> None:
         if self._model is None:
-            logger.info("Loading toxic-bert model …")
-            self._tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-            self._model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME)
-            self._model.eval()
-            # Label order from the model config (toxic, severe_toxic, obscene, threat, insult, identity_hate)
-            self._label_names = list(self._model.config.id2label.values())
-            logger.info("toxic-bert model loaded. Labels: %s", self._label_names)
+            logger.info("toxicity_model_loading", model="toxic-bert")
+            try:
+                self._tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+                self._model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME)
+                self._model.eval()
+                # Label order from the model config (toxic, severe_toxic, obscene, threat, insult, identity_hate)
+                self._label_names = list(self._model.config.id2label.values())
+                logger.info("toxicity_model_loaded", model="toxic-bert", labels=len(self._label_names))
+            except Exception as e:
+                error_msg = f"Model load failed: {str(e)}"
+                logger.error("toxicity_model_load_failed", error=str(e))
+                health_checks().mark_error("ToxicityAgent", error_msg)
+                raise
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -121,13 +133,15 @@ class ToxicityAgent:
         self._load_model()
         self._running = True
         self.bus.subscribe("text_transcript", self._handle_transcript)
-        logger.info("ToxicityAgent started — listening for text_transcript events.")
+        health_checks().mark_ready("ToxicityAgent")
+        logger.info("toxicity_agent_started", subscribed_to="text_transcript")
 
         while self._running:
             await asyncio.sleep(0.1)
 
     def stop(self) -> None:
         self._running = False
+        health_checks().mark_starting("ToxicityAgent")
 
     # ------------------------------------------------------------------
     # Event handler
@@ -139,9 +153,12 @@ class ToxicityAgent:
         if not text:
             return
 
+        m = metrics()
+        start_time = time.time()
+
         # Fast-path: skip model entirely for clearly safe utterances
         if _is_safe(text):
-            logger.debug("Safe phrase — skipping classification: '%s'", text[:60])
+            logger.debug("safe_phrase_skip", text_length=len(text), speaker=speaker)
             self.state.record_utterance(speaker, False)
             await self.bus.emit(
                 Event(
@@ -155,42 +172,72 @@ class ToxicityAgent:
                         "strictness": self.state.get_speaker(speaker).rewrite_strictness,
                         "timestamp": time.time(),
                     },
+                    correlation_id=event.correlation_id,
                 )
             )
             return
 
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, self._classify, text)
+        try:
+            loop = asyncio.get_running_loop()
+            
+            with m.toxicity_latency_seconds.time():
+                result = await loop.run_in_executor(None, self._classify, text)
 
-        toxic: bool = result["toxic"]
-        confidence: float = result["confidence"]
-        labels: dict = result["labels"]
+            toxic: bool = result["toxic"]
+            confidence: float = result["confidence"]
+            labels: dict = result["labels"]
 
-        # Update shared state
-        self.state.record_utterance(speaker, toxic)
-        profile = self.state.get_speaker(speaker)
+            # Update shared state
+            self.state.record_utterance(speaker, toxic)
+            profile = self.state.get_speaker(speaker)
 
-        logger.info(
-            "Toxicity result — toxic=%s  confidence=%.3f  text='%s'",
-            toxic,
-            confidence,
-            text[:80],
-        )
+            # Record metrics
+            if toxic:
+                severity = "high" if confidence > 0.8 else "medium" if confidence > 0.6 else "low"
+                m.toxicity_detections_total.labels(severity=severity).inc()
 
-        await self.bus.emit(
-            Event(
-                "toxicity_result",
-                {
-                    "text": text,
-                    "speaker": speaker,
-                    "toxic": toxic,
-                    "confidence": confidence,
-                    "labels": labels,
-                    "strictness": profile.rewrite_strictness,
-                    "timestamp": time.time(),
-                },
+            elapsed = time.time() - start_time
+            logger.info(
+                "toxicity_classification_complete",
+                correlation_id=event.correlation_id,
+                toxic=toxic,
+                confidence=round(confidence, 3),
+                text_length=len(text),
+                duration_ms=int(elapsed * 1000),
             )
-        )
+
+            await self.bus.emit(
+                Event(
+                    "toxicity_result",
+                    {
+                        "text": text,
+                        "speaker": speaker,
+                        "toxic": toxic,
+                        "confidence": confidence,
+                        "labels": labels,
+                        "strictness": profile.rewrite_strictness,
+                        "timestamp": time.time(),
+                    },
+                    correlation_id=event.correlation_id,
+                )
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "toxicity_timeout",
+                correlation_id=event.correlation_id,
+                error="Classification timed out",
+                text_length=len(text),
+            )
+            health_checks().mark_error("ToxicityAgent", "Classification timeout")
+        except Exception as e:
+            logger.error(
+                "toxicity_error",
+                correlation_id=event.correlation_id,
+                error=str(e),
+                error_type=type(e).__name__,
+                text_length=len(text),
+            )
+            health_checks().mark_error("ToxicityAgent", f"Classification error: {str(e)}")
 
     # ------------------------------------------------------------------
     # Classification helper
