@@ -17,6 +17,7 @@ import logging
 import os
 import signal
 import sys
+import subprocess
 
 # ---------------------------------------------------------------------------
 # Load configuration early
@@ -51,6 +52,7 @@ from agents.asr_agent import ASRAgent
 from agents.toxicity_agent import ToxicityAgent
 from agents.rewrite_agent import RewriteAgent
 from agents.voice_agent import VoiceAgent
+from agents.diarization_agent import DiarizationAgent
 from agents.orchestrator import OrchestratorAgent
 
 
@@ -65,6 +67,7 @@ async def main() -> None:
     hc.mark_starting("EventBus")
     hc.mark_starting("AudioAgent")
     hc.mark_starting("ASRAgent")
+    hc.mark_starting("DiarizationAgent")
     hc.mark_starting("ToxicityAgent")
     hc.mark_starting("RewriteAgent")
     hc.mark_starting("VoiceAgent")
@@ -83,11 +86,12 @@ async def main() -> None:
     audio_agent = AudioAgent(bus, state)
     asr_agent = ASRAgent(bus, state)
     toxicity_agent = ToxicityAgent(bus, state)
+    diarization_agent = DiarizationAgent(bus, state)
     rewrite_agent = RewriteAgent(bus, state)
     voice_agent = VoiceAgent(bus, state, play_audio=config.voice.play_audio)
     orchestrator = OrchestratorAgent(bus, state)
 
-    agents = [audio_agent, asr_agent, toxicity_agent, rewrite_agent, voice_agent, orchestrator]
+    agents = [audio_agent, asr_agent, diarization_agent, toxicity_agent, rewrite_agent, voice_agent, orchestrator]
 
     # --- Graceful shutdown ---
     shutdown_event = asyncio.Event()
@@ -114,6 +118,17 @@ async def main() -> None:
     # --- Setup dashboard writer ---
     log_dir = os.path.join(os.path.dirname(__file__), config.logging.log_dir)
     os.makedirs(log_dir, exist_ok=True)
+    
+    dashboard_process = None
+    if config.dashboard.enabled:
+        logger.info(f"Starting Streamlit dashboard on port {config.dashboard.port}...")
+        dashboard_process = subprocess.Popen(
+            [
+                sys.executable, "-m", "streamlit", "run", "dashboard.py",
+                "--server.port", str(config.dashboard.port),
+                "--server.headless", "true"
+            ]
+        )
 
     async def _dashboard_writer() -> None:
         """Periodically write GlobalState snapshot to JSON for the Streamlit dashboard."""
@@ -133,6 +148,7 @@ async def main() -> None:
         asyncio.create_task(bus.start(), name="EventBus"),
         asyncio.create_task(audio_agent.start(), name="AudioAgent"),
         asyncio.create_task(asr_agent.start(), name="ASRAgent"),
+        asyncio.create_task(diarization_agent.start(), name="DiarizationAgent"),
         asyncio.create_task(toxicity_agent.start(), name="ToxicityAgent"),
         asyncio.create_task(rewrite_agent.start(), name="RewriteAgent"),
         asyncio.create_task(voice_agent.start(), name="VoiceAgent"),
@@ -143,7 +159,7 @@ async def main() -> None:
     logger.info("All agents launched", metric="startup_complete")
 
     # Mark all agents as ready
-    for agent_name in ["AudioAgent", "ASRAgent", "ToxicityAgent", "RewriteAgent", "VoiceAgent", "OrchestratorAgent"]:
+    for agent_name in ["AudioAgent", "ASRAgent", "DiarizationAgent", "ToxicityAgent", "RewriteAgent", "VoiceAgent", "OrchestratorAgent"]:
         hc.mark_ready(agent_name)
     hc.mark_ready("EventBus")
 
@@ -154,6 +170,14 @@ async def main() -> None:
     except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Interrupted — shutting down …")
         _signal_handler()
+    finally:
+        if dashboard_process is not None:
+            logger.info("Terminating Streamlit dashboard...")
+            dashboard_process.terminate()
+            try:
+                dashboard_process.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                dashboard_process.kill()
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

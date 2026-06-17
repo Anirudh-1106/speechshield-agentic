@@ -10,6 +10,7 @@ faster-whisper>=1.0.0
 # Toxicity detection
 transformers>=4.38.0
 torch>=2.2.0
+torchaudio>=2.2.0
 
 # Text-to-Speech — Edge TTS (async, no model download, Python 3.12 compatible)
 edge-tts>=6.1.0
@@ -41,4 +42,8 @@ fastapi>=0.104.0
 uvicorn>=0.24.0
 
 # Utilities
-numpy>=1.26.0
+numpy==1.26.4
+matplotlib==3.8.4
+
+# Diarization
+pyannote.audio>=3.1.1

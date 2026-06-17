@@ -8,6 +8,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pyaudio
 
 if TYPE_CHECKING:
@@ -57,7 +58,7 @@ class AudioAgent:
             channels=CHANNELS,
             rate=SAMPLE_RATE,
             input=True,
-            frames_per_buffer=CHUNK,
+            frames_per_buffer=self.state.settings.audio.chunk_size,
             stream_callback=self._audio_callback,
         )
         self._stream.start_stream()
@@ -71,7 +72,11 @@ class AudioAgent:
                     continue
 
                 await self.bus.emit(
-                    Event("audio_chunk", {"audio": chunk, "sample_rate": SAMPLE_RATE})
+                    Event("audio_chunk", {
+                        "audio": chunk, 
+                        "sample_rate": SAMPLE_RATE,
+                        "speaker": getattr(self.state, "current_speaker", "default"),
+                    })
                 )
         except asyncio.CancelledError:
             logger.info("AudioAgent cancelled.")
@@ -93,18 +98,30 @@ class AudioAgent:
         status_flags: int,
     ) -> tuple[None, int]:
         if in_data is not None:
-            try:
-                self._buffer.put_nowait(in_data)
-            except asyncio.QueueFull:
-                # Drop oldest chunk to keep real-time
-                try:
-                    self._buffer.get_nowait()
-                except asyncio.QueueEmpty:
-                    pass
+            # Convert to numpy array to calculate RMS
+            audio_data = np.frombuffer(in_data, dtype=np.int16)
+            rms = np.sqrt(np.mean(np.square(audio_data.astype(np.float32))))
+
+            # Get silence threshold from config (default 500.0 if not set)
+            silence_threshold = getattr(self.state.settings.audio, "silence_threshold", 500.0)
+
+            if rms < silence_threshold:
+                # Dropped chunk due to silence
+                from core.metrics import metrics
+                metrics().audio_chunks_dropped_total.labels(reason="silence").inc()
+            else:
                 try:
                     self._buffer.put_nowait(in_data)
                 except asyncio.QueueFull:
-                    pass
+                    # Drop oldest chunk to keep real-time
+                    try:
+                        self._buffer.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                    try:
+                        self._buffer.put_nowait(in_data)
+                    except asyncio.QueueFull:
+                        pass
         return (None, pyaudio.paContinue)
 
     # ------------------------------------------------------------------

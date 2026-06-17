@@ -98,6 +98,9 @@ class GlobalState:
         self.dashboard_log: list[DashboardRow] = []
         self._max_dashboard_rows: int = settings.dashboard.max_rows
 
+        # Active tracking
+        self.current_speaker: str = "default"
+
         logger.info(
             "GlobalState initialized with settings env=%s latency_budget_ms=%.0f threshold=%.2f",
             settings.env,

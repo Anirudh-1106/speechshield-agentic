@@ -83,6 +83,13 @@ class Metrics:
                 registry=self.registry,
             )
 
+            self.speaker_identification_latency_seconds = Histogram(
+                name="speechshield_speaker_identification_latency_seconds",
+                documentation="Diarization latency",
+                buckets=(0.1, 0.5, 1.0, 2.0, 5.0, 10.0),
+                registry=self.registry,
+            )
+
             # =====================================================================
             # Counters
             # =====================================================================
@@ -108,11 +115,6 @@ class Metrics:
                 registry=self.registry,
             )
 
-            self.audio_chunks_dropped_total = Counter(
-                name="speechshield_audio_chunks_dropped_total",
-                documentation="Total audio chunks dropped due to queue overflow",
-                registry=self.registry,
-            )
 
             self.utterances_processed_total = Counter(
                 name="speechshield_utterances_processed_total",
@@ -125,6 +127,19 @@ class Metrics:
                 name="speechshield_asr_errors_total",
                 documentation="Total ASR errors",
                 labelnames=["reason"],  # timeout, no_speech, decode_error
+                registry=self.registry,
+            )
+
+            self.speaker_changes_total = Counter(
+                name="speechshield_speaker_changes_total",
+                documentation="Total speaker changes",
+                registry=self.registry,
+            )
+
+            self.audio_chunks_dropped_total = Counter(
+                name="speechshield_audio_chunks_dropped_total",
+                documentation="Total audio chunks dropped",
+                labelnames=["reason"],
                 registry=self.registry,
             )
 
@@ -201,6 +216,9 @@ class Metrics:
             self.pipeline_latency_seconds = self.registry._names_to_collectors.get(
                 "speechshield_pipeline_latency_seconds"
             )
+            self.speaker_identification_latency_seconds = self.registry._names_to_collectors.get(
+                "speechshield_speaker_identification_latency_seconds"
+            )
             self.toxicity_detections_total = self.registry._names_to_collectors.get(
                 "speechshield_toxicity_detections_total"
             )
@@ -218,6 +236,10 @@ class Metrics:
             )
             self.asr_errors_total = self.registry._names_to_collectors.get(
                 "speechshield_asr_errors_total"
+            )
+
+            self.speaker_changes_total = self.registry._names_to_collectors.get(
+                "speechshield_speaker_changes_total"
             )
             self.audio_queue_depth_samples = self.registry._names_to_collectors.get(
                 "speechshield_audio_queue_depth_samples"

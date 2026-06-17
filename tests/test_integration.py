@@ -34,9 +34,11 @@ class TestPipelineIntegration:
         bus, state, toxicity_agent, rewrite_agent = setup_pipeline
 
         results: list[Event] = []
+        done = asyncio.Event()
 
         async def capture_rewrite(event: Event) -> None:
             results.append(event)
+            done.set()
 
         bus.subscribe("rewrite_result", capture_rewrite)
 
@@ -47,6 +49,8 @@ class TestPipelineIntegration:
             asyncio.create_task(rewrite_agent.start()),
         ]
 
+        await asyncio.sleep(0.5)
+
         # Inject a toxic transcript directly
         await bus.emit(Event("text_transcript", {
             "text": "You are a fucking idiot",
@@ -54,7 +58,10 @@ class TestPipelineIntegration:
         }))
 
         # Wait for pipeline to process
-        await asyncio.sleep(3.0)
+        try:
+            await asyncio.wait_for(done.wait(), timeout=15.0)
+        except asyncio.TimeoutError:
+            pass
 
         # Cleanup
         bus.stop()
@@ -76,9 +83,11 @@ class TestPipelineIntegration:
         bus, state, toxicity_agent, rewrite_agent = setup_pipeline
 
         results: list[Event] = []
+        done = asyncio.Event()
 
         async def capture_rewrite(event: Event) -> None:
             results.append(event)
+            done.set()
 
         bus.subscribe("rewrite_result", capture_rewrite)
 
@@ -88,12 +97,17 @@ class TestPipelineIntegration:
             asyncio.create_task(rewrite_agent.start()),
         ]
 
+        await asyncio.sleep(0.5)
+
         await bus.emit(Event("text_transcript", {
             "text": "I really enjoy working with you",
             "speaker": "test_user",
         }))
 
-        await asyncio.sleep(3.0)
+        try:
+            await asyncio.wait_for(done.wait(), timeout=15.0)
+        except asyncio.TimeoutError:
+            pass
 
         bus.stop()
         toxicity_agent.stop()

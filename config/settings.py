@@ -15,7 +15,7 @@ Usage:
 import os
 import logging
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal, Optional, Any
 from pydantic import BaseModel, Field
 import yaml
 
@@ -49,12 +49,16 @@ class AudioSettings(BaseModel):
         default=200,
         description="Max size of audio chunk queue",
     )
+    silence_threshold: float = Field(
+        default=500.0,
+        description="RMS threshold below which audio chunks are dropped",
+    )
 
 
 class ASRSettings(BaseModel):
     """Automatic Speech Recognition configuration."""
 
-    model_size: Literal["tiny", "base", "small", "medium", "large"] = Field(
+    model_size: Literal["tiny", "base", "small", "medium", "large"] = Field(  # pyrefly: ignore
         default="small",
         description="Faster-Whisper model size",
     )
@@ -65,6 +69,18 @@ class ASRSettings(BaseModel):
     timeout_seconds: float = Field(
         default=30.0,
         description="ASR inference timeout",
+    )
+    idle_flush_ms: float = Field(
+        default=500.0,
+        description="Milliseconds of silence before transcribing early",
+    )
+    vad_filter: bool = Field(
+        default=True,
+        description="Enable Whisper VAD filter",
+    )
+    vad_min_silence_ms: int = Field(
+        default=500,
+        description="Whisper VAD min silence duration",
     )
 
 
@@ -171,7 +187,7 @@ class PipelineSettings(BaseModel):
 class LoggingSettings(BaseModel):
     """Logging configuration."""
 
-    level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
+    level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(  # pyrefly: ignore
         default="INFO",
         description="Logging level",
     )
@@ -179,7 +195,7 @@ class LoggingSettings(BaseModel):
         default="logs/",
         description="Directory for log files",
     )
-    format: Literal["text", "json"] = Field(
+    format: Literal["text", "json"] = Field(  # pyrefly: ignore
         default="text",
         description="Log format (text or JSON for structured logging)",
     )
@@ -273,7 +289,7 @@ def load_config(env: Optional[str] = None) -> Settings:
     # Load default config
     if not default_yaml.exists():
         logger.warning(f"Default config not found at {default_yaml}, using Pydantic defaults")
-        config_data = {}
+        config_data: dict[str, Any] = {}
     else:
         with open(default_yaml) as f:
             config_data = yaml.safe_load(f) or {}

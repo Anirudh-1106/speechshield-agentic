@@ -1,0 +1,2 @@
+[project]
+python_interpreter = "venv/Scripts/python.exe"
