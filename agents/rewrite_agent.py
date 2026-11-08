@@ -2,7 +2,8 @@
 RewriteAgent — Rewrites toxic speech into polite alternatives.
 
 Receives toxicity_result events.
-- If toxic: attempts LLM-based rewrite (Ollama) first, falls back to rules.
+- If toxic: attempts a guarded LLM rewrite first (when the rewrite will be
+  heard), falls back to deterministic rules.
 - If not toxic: passes through the original text unchanged.
 Emits rewrite_result events.
 
@@ -15,7 +16,7 @@ Metrics:
 import asyncio
 import re
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 from core.event_bus import Event
 from core.logging import get_logger
@@ -49,6 +50,9 @@ _REWRITE_RULES: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bfuck\s+off\b",                re.I), "please go away"),
     (re.compile(r"\bfuck\s+you\b",                re.I), "I disagree with you"),
     (re.compile(r"\bfucking\b",                   re.I), "very"),
+    (re.compile(r"\bfuckin'?(?=\W|$)",            re.I), "very"),
+    (re.compile(r"\bf\*+(?:ing|in)\b",            re.I), "very"),
+    (re.compile(r"\bmotherfuck\w*",               re.I), "jerk"),
     (re.compile(r"\bfucked\s+up\b",               re.I), "messed up"),
     (re.compile(r"\bbull\s*shit\b",                re.I), "nonsense"),
     (re.compile(r"\bass\s*hole\b",                 re.I), "rude person"),
@@ -131,126 +135,145 @@ _REWRITE_RULES: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bshitty\b",       re.I), "poor"),
     (re.compile(r"\bbitchy\b",       re.I), "rude"),
     (re.compile(r"\bworst\b",        re.I), "least good"),
+
+    # --- Catch-alls (run last, after the more natural specific swaps) ---
+    (re.compile(r"\bfuck\w*",        re.I), "darn"),
+    (re.compile(r"\bshit\w*",        re.I), "stuff"),
+    (re.compile(r"\bbitch\w*",       re.I), "rude person"),
+    # Whisper often self-censors swearing as "f***" / "****": drop those tokens.
+    (re.compile(r"(?<!\S)\S*\*{2,}\S*"), ""),
 ]
 
 
 class RewriteAgent:
-    """Hybrid rewriter: LLM-first with rule-based fallback."""
+    """Hybrid rewriter: LLM-first with guarded, rule-based fallback."""
 
-    def __init__(self, event_bus: "EventBus", state: "GlobalState") -> None:
+    def __init__(
+        self,
+        event_bus: "EventBus",
+        state: "GlobalState",
+        *,
+        verifier: Optional[Callable[[str], Awaitable[float]]] = None,
+    ) -> None:
         self.bus = event_bus
         self.state = state
         self._running = False
-        self._llm = LLMRewriter()
+        self._stopped = asyncio.Event()
+        self._llm = LLMRewriter(state.settings.rewrite)
+        # Re-score LLM output with the toxicity model before it is ever spoken.
+        self._llm.verifier = verifier
+        self._llm.verify_threshold = state.settings.toxicity.threshold
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
+        self._stopped.clear()
         self._running = True
         self.bus.subscribe("toxicity_result", self._handle_toxicity)
         health_checks().mark_ready("RewriteAgent")
-        logger.info("rewrite_agent_started", subscribed_to="toxicity_result")
+        provider = self.state.settings.rewrite.llm_provider
+        logger.info("rewrite_agent_started", subscribed_to="toxicity_result", provider=provider)
 
-        while self._running:
-            await asyncio.sleep(0.1)
+        # Loading the LLM costs ~2 GB of RAM: skip it when no rewrite will be heard.
+        warmup = asyncio.create_task(self._warmup() if self._llm_wanted("audio") else self._probe())
+        try:
+            await self._stopped.wait()
+        finally:
+            warmup.cancel()
+            await self._llm.close()
+
+    async def _warmup(self) -> None:
+        try:
+            await self._llm.warmup()
+        except Exception as exc:
+            logger.debug("llm_warmup_failed", error=str(exc))
+        available = await self._llm.is_available()
+        self.state.system_info["rewrite"] = (
+            f"{self._llm.provider}:{self._llm.active_model}" if available else "rules (LLM unavailable)"
+        )
+
+    async def _probe(self) -> None:
+        """Check the LLM is reachable (for API requests) without loading the model."""
+        available = await self._llm.is_available()
+        self.state.system_info["rewrite"] = f"rules (LLM {self._llm.active_model} on demand)" if available else "rules"
 
     def stop(self) -> None:
         self._running = False
+        self._stopped.set()
         health_checks().mark_starting("RewriteAgent")
 
     # ------------------------------------------------------------------
     # Event handler
     # ------------------------------------------------------------------
 
+    def _llm_wanted(self, source: str) -> bool:
+        """Only pay LLM latency when the rewrite will actually be heard or returned."""
+        if self.state.settings.rewrite.llm_provider == "local":
+            return False
+        icfg = self.state.settings.interceptor
+        if source == "api" or not icfg.enabled:
+            return True
+        return icfg.censor_mode == "tts"
+
     async def _handle_toxicity(self, event: Event) -> None:
         text: str = event.data.get("text", "")
         toxic: bool = event.data.get("toxic", False)
         speaker: str = event.data.get("speaker", "default")
         strictness: float = event.data.get("strictness", 1.0)
+        source: str = event.data.get("source", "audio")
+        cid = event.correlation_id
         rewrite_method = "passthrough"
+        llm_reason = ""
         m = metrics()
-        
         start_time = time.time()
+        context = self.state.get_history(speaker)
 
-        try:
-            if toxic:
-                # Try LLM first (in executor — it's synchronous HTTP)
-                loop = asyncio.get_running_loop()
-                
+        if toxic:
+            rewritten = ""
+            if self._llm_wanted(source):
                 with m.rewrite_latency_seconds.time():
-                    llm_result = await loop.run_in_executor(None, self._llm.rewrite, text)
-
-                if llm_result:
-                    rewritten = llm_result
-                    rewrite_method = "llm"
+                    outcome = await self._llm.rewrite(text, context=context, strictness=strictness)
+                llm_reason = outcome.reason
+                if outcome.text:
+                    rewritten, rewrite_method = outcome.text, "llm"
                     m.rewrite_attempts_total.labels(status="success").inc()
-                    logger.info(
-                        "rewrite_llm_success",
-                        correlation_id=event.correlation_id,
-                        original_length=len(text),
-                        rewritten_length=len(rewritten),
-                    )
                 else:
-                    rewritten = self._rewrite(text, strictness)
-                    rewrite_method = "rules"
-                    m.rewrite_fallback_total.labels(reason="llm_timeout").inc()
-                    logger.info(
-                        "rewrite_fallback_to_rules",
-                        correlation_id=event.correlation_id,
-                        reason="llm_timeout",
-                        original_length=len(text),
-                    )
-            else:
-                rewritten = text
-                logger.debug(
-                    "rewrite_passthrough",
-                    correlation_id=event.correlation_id,
-                    text_length=len(text),
-                )
-
-            elapsed = time.time() - start_time
+                    if outcome.reason.startswith("guardrail:"):
+                        m.rewrite_guardrail_rejections_total.labels(reason=outcome.reason.split(":", 1)[1]).inc()
+                    elif outcome.reason in ("timeout", "error"):
+                        m.rewrite_attempts_total.labels(status=outcome.reason).inc()
+                    m.rewrite_fallback_total.labels(reason=outcome.reason.split(":", 1)[0]).inc()
+            if not rewritten:
+                rewritten, rewrite_method = self._rewrite(text, strictness), "rules"
             logger.info(
                 "rewrite_complete",
-                correlation_id=event.correlation_id,
+                correlation_id=cid,
                 method=rewrite_method,
-                duration_ms=int(elapsed * 1000),
+                llm_reason=llm_reason or None,
+                duration_ms=int((time.time() - start_time) * 1000),
             )
+        else:
+            rewritten = text
+            logger.debug("rewrite_passthrough", correlation_id=cid, text_length=len(text))
 
-            await self.bus.emit(
-                Event(
-                    "rewrite_result",
-                    {
-                        "original_text": text,
-                        "rewritten_text": rewritten,
-                        "was_toxic": toxic,
-                        "rewrite_method": rewrite_method,
-                        "speaker": speaker,
-                        "timestamp": time.time(),
-                    },
-                    correlation_id=event.correlation_id,
-                )
-            )
-        except asyncio.TimeoutError:
-            logger.error(
-                "rewrite_timeout",
-                correlation_id=event.correlation_id,
-                error="Rewrite timed out",
-                text_length=len(text),
-            )
-            m.rewrite_attempts_total.labels(status="timeout").inc()
-            health_checks().mark_error("RewriteAgent", "Rewrite timeout")
-        except Exception as e:
-            logger.error(
-                "rewrite_error",
-                correlation_id=event.correlation_id,
-                error=str(e),
-                error_type=type(e).__name__,
-                text_length=len(text),
-            )
-            m.rewrite_attempts_total.labels(status="error").inc()
-            health_checks().mark_error("RewriteAgent", f"Rewrite error: {str(e)}")
+        self.state.add_history(speaker, text)
+        trace = self.state.trace(cid)
+        trace.rewritten, trace.rewrite_method = rewritten, rewrite_method
+        stage_ms = self.state.mark_stage(cid, "rewrite")
+        m.stage_latency_seconds.labels(stage="rewrite").observe(stage_ms / 1000.0)
+
+        await self.bus.emit(Event("rewrite_result", {
+            "original_text": text,
+            "rewritten_text": rewritten,
+            "was_toxic": toxic,
+            "rewrite_method": rewrite_method,
+            "llm_reason": llm_reason,
+            "speaker": speaker,
+            "source": source,
+            "timestamp": time.time(),
+        }, correlation_id=cid))
 
     # ------------------------------------------------------------------
     # Rule-based rewriting
