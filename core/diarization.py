@@ -1,224 +1,153 @@
 """
-Speaker Diarization Engine using pyannote.audio.
+Streaming speaker identification.
 
-Identifies speaker changes in audio streams and provides:
-  • Real-time speaker segmentation
-  • Speaker embedding extraction
-  • Speaker re-identification and clustering
-  • Confidence scoring for speaker changes
+Running a full batch diarization pipeline on short windows does not work
+for live audio: each run labels speakers from scratch, so "SPEAKER_00" in
+one window has nothing to do with "SPEAKER_00" in the next.  Instead we:
+
+  1. embed each utterance with a speaker-embedding model (pyannote), and
+  2. cluster embeddings *online* — each utterance joins the most similar
+     known speaker (cosine similarity ≥ threshold) or starts a new one.
+
+``SpeakerTracker`` is pure numpy and model-agnostic; ``DiarizationEngine``
+adds the pyannote embedding backend.
 
 Usage:
-    from core.diarization import DiarizationEngine
-
-    engine = DiarizationEngine(model="pyannote/speaker-diarization-3.1")
-    segments = await engine.diarize(audio_data, sample_rate=16000)
-    # → [
-    #     {"start": 0.0, "end": 2.5, "speaker": "speaker_1", "confidence": 0.95},
-    #     {"start": 2.5, "end": 5.0, "speaker": "speaker_2", "confidence": 0.98},
-    #   ]
+    engine = DiarizationEngine(settings.diarization)
+    speaker_id, similarity = engine.identify(pcm_bytes, sample_rate=16000)
 """
 
-import asyncio
-import logging
-import time
-from typing import Optional
+from __future__ import annotations
 
-try:
-    import torchaudio
-    if not hasattr(torchaudio, "AudioMetaData"):
-        torchaudio.AudioMetaData = type("AudioMetaData", (), {})
-    if not hasattr(torchaudio, "list_audio_backends"):
-        torchaudio.list_audio_backends = lambda: ["soundfile"]
-    from pyannote.audio import Pipeline
-    from pyannote.core import Segment
-except ImportError:
-    Pipeline = None  # type: ignore
-    Segment = None  # type: ignore
+import os
+import time
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Optional
+
+import numpy as np
 
 from core.logging import get_logger
+
+if TYPE_CHECKING:
+    from config.settings import DiarizationSettings
 
 logger = get_logger("core.diarization")
 
 
-class DiarizationEngine:
-    """Speaker diarization using pre-trained pyannote models."""
+@dataclass
+class _Speaker:
+    id: str
+    centroid: np.ndarray
+    count: int = 1
+    first_seen: float = field(default_factory=time.time)
+    last_seen: float = field(default_factory=time.time)
 
-    def __init__(self, model: str = "pyannote/speaker-diarization-3.1", device: str = "cpu"):
-        """
-        Initialize diarization engine.
 
-        Args:
-            model: Hugging Face model ID (default: pyannote/speaker-diarization-3.1)
-            device: Compute device ("cpu" or "cuda")
+class SpeakerTracker:
+    """Online clustering of speaker embeddings by cosine similarity."""
 
-        Raises:
-            ImportError: If pyannote.audio not installed
-        """
-        if Pipeline is None:
-            raise ImportError(
-                "pyannote.audio not installed. Install with: pip install pyannote.audio"
-            )
+    def __init__(self, threshold: float = 0.5, max_speakers: int = 8) -> None:
+        self.threshold = threshold
+        self.max_speakers = max_speakers
+        self._speakers: list[_Speaker] = []
 
-        self.model_name = model
-        self.device = device
-        self._pipeline: Optional[Pipeline] = None
-        self._speaker_cache: dict[str, dict] = {}  # Cache speaker embeddings
-        self._speaker_count = 0
+    @staticmethod
+    def _unit(v: np.ndarray) -> np.ndarray:
+        v = np.asarray(v, dtype=np.float32).reshape(-1)
+        n = float(np.linalg.norm(v))
+        return v / n if n > 0 else v
 
-    def _load_pipeline(self) -> None:
-        """Load diarization pipeline (lazy loading)."""
-        if self._pipeline is None:
-            logger.info(
-                "diarization_model_loading",
-                model=self.model_name,
-                device=self.device,
-            )
-            try:
-                self._pipeline = Pipeline.from_pretrained(
-                    self.model_name,
-                    use_auth_token=None,  # Set if using private models
-                )
-                self._pipeline.to(self.device)
-                logger.info(
-                    "diarization_model_loaded",
-                    model=self.model_name,
-                )
-            except Exception as e:
-                error_msg = f"Failed to load diarization model: {str(e)}"
-                logger.error(
-                    "diarization_model_load_failed",
-                    error=str(e),
-                    model=self.model_name,
-                )
-                raise RuntimeError(error_msg) from e
-
-    async def diarize(
-        self,
-        audio_data: bytes,
-        sample_rate: int = 16000,
-        min_duration: float = 0.5,
-    ) -> list[dict]:
-        """
-        Perform speaker diarization on audio data.
-
-        Args:
-            audio_data: Raw PCM audio bytes (16-bit)
-            sample_rate: Sample rate in Hz (default: 16000)
-            min_duration: Minimum segment duration in seconds (default: 0.5)
-
-        Returns:
-            List of diarization segments:
-            [
-                {
-                    "start": 0.0,
-                    "end": 2.5,
-                    "speaker": "speaker_1",
-                    "confidence": 0.95,
-                },
-                ...
-            ]
-        """
-        self._load_pipeline()
-        start_time = time.time()
-
-        try:
-            # Convert bytes to numpy array
-            import numpy as np
-            import io
-            import wave
-
-            wav_buffer = io.BytesIO()
-            with wave.open(wav_buffer, "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(sample_rate)
-                wf.writeframes(audio_data)
-
-            wav_buffer.seek(0)
-
-            # Run diarization in executor (blocking operation)
-            loop = asyncio.get_running_loop()
-            diarization = await loop.run_in_executor(
-                None,
-                self._pipeline,
-                wav_buffer,
-            )
-
-            # Convert diarization to segments list
-            segments = []
-            for turn, _, speaker in diarization.itertracks(yield_label=True):
-                if turn.duration < min_duration:
-                    continue  # Skip very short segments
-
-                speaker_id = self._get_or_create_speaker_id(speaker)
-
-                segments.append({
-                    "start": turn.start,
-                    "end": turn.end,
-                    "speaker": speaker_id,
-                    "confidence": 0.95,  # pyannote doesn't provide confidence directly
-                    "duration": turn.duration,
-                })
-
-            elapsed = time.time() - start_time
-            logger.info(
-                "diarization_complete",
-                segments_count=len(segments),
-                duration_seconds=round(elapsed, 3),
-                audio_duration_seconds=round(len(audio_data) / (sample_rate * 2), 2),
-            )
-
-            return segments
-
-        except Exception as e:
-            elapsed = time.time() - start_time
-            logger.error(
-                "diarization_error",
-                error=str(e),
-                error_type=type(e).__name__,
-                duration_ms=int(elapsed * 1000),
-            )
-            raise
-
-    def _get_or_create_speaker_id(self, speaker_label: str) -> str:
-        """
-        Map pyannote speaker labels to stable speaker IDs.
-
-        Args:
-            speaker_label: Raw label from pyannote (e.g., "Speaker 0")
-
-        Returns:
-            Normalized speaker ID (e.g., "speaker_1")
-        """
-        if speaker_label not in self._speaker_cache:
-            self._speaker_count += 1
-            speaker_id = f"speaker_{self._speaker_count}"
-            self._speaker_cache[speaker_label] = {
-                "id": speaker_id,
-                "label": speaker_label,
-                "first_seen": time.time(),
-            }
-            logger.debug(
-                "speaker_identified",
-                speaker_id=speaker_id,
-                pyannote_label=speaker_label,
-            )
-
-        return self._speaker_cache[speaker_label]["id"]
+    def assign(self, embedding: np.ndarray) -> tuple[str, float, bool]:
+        """Return ``(speaker_id, similarity, is_new)`` for an utterance embedding."""
+        e = self._unit(embedding)
+        if self._speakers:
+            sims = [float(np.dot(e, s.centroid)) for s in self._speakers]
+            best = int(np.argmax(sims))
+            if sims[best] >= self.threshold or len(self._speakers) >= self.max_speakers:
+                spk = self._speakers[best]
+                # Running mean keeps the centroid stable as evidence accumulates.
+                spk.centroid = self._unit(spk.centroid * spk.count + e)
+                spk.count += 1
+                spk.last_seen = time.time()
+                return spk.id, sims[best], False
+        spk = _Speaker(id=f"speaker_{len(self._speakers) + 1}", centroid=e)
+        self._speakers.append(spk)
+        return spk.id, 1.0, True
 
     def reset(self) -> None:
-        """Reset speaker mapping (for new conversation/session)."""
-        self._speaker_cache.clear()
-        self._speaker_count = 0
-        logger.info("diarization_reset")
+        self._speakers.clear()
+
+    @property
+    def count(self) -> int:
+        return len(self._speakers)
+
+    def speakers(self) -> dict[str, dict]:
+        return {
+            s.id: {"utterances": s.count, "first_seen": s.first_seen, "last_seen": s.last_seen}
+            for s in self._speakers
+        }
+
+
+class DiarizationEngine:
+    """Speaker-embedding model + online tracker."""
+
+    def __init__(self, settings: "DiarizationSettings") -> None:
+        self.settings = settings
+        self.tracker = SpeakerTracker(settings.similarity_threshold, settings.max_speakers)
+        self._inference: Any = None
+
+    def load(self) -> None:
+        """Load the embedding model (raises with an actionable message on failure)."""
+        if self._inference is not None:
+            return
+        try:
+            import torchaudio
+            # pyannote 3.x references torchaudio APIs removed in torchaudio 2.9+
+            if not hasattr(torchaudio, "AudioMetaData"):
+                torchaudio.AudioMetaData = type("AudioMetaData", (), {})  # type: ignore[attr-defined]
+            if not hasattr(torchaudio, "list_audio_backends"):
+                torchaudio.list_audio_backends = lambda: ["soundfile"]  # type: ignore[attr-defined]
+            from pyannote.audio import Inference, Model
+        except ImportError as e:
+            raise RuntimeError("pyannote.audio is not installed: pip install -r requirements-diarization.txt") from e
+
+        token = self.settings.hf_token or os.getenv("HF_TOKEN")
+        logger.info("diarization_model_loading", model=self.settings.embedding_model, token=bool(token))
+        try:
+            model = Model.from_pretrained(self.settings.embedding_model, use_auth_token=token)
+        except Exception as e:
+            raise RuntimeError(
+                f"Could not load '{self.settings.embedding_model}': {e}. If the model is gated, accept its terms "
+                "on huggingface.co and set HF_TOKEN."
+            ) from e
+        if model is None:
+            raise RuntimeError(f"'{self.settings.embedding_model}' needs a HuggingFace token (set HF_TOKEN).")
+        self._inference = Inference(model, window="whole")
+        logger.info("diarization_model_loaded", model=self.settings.embedding_model)
+
+    def embed(self, pcm: bytes, sample_rate: int = 16000) -> np.ndarray:
+        import torch
+
+        audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+        waveform = torch.from_numpy(audio).unsqueeze(0)
+        return np.asarray(self._inference({"waveform": waveform, "sample_rate": sample_rate}))
+
+    def identify(self, pcm: bytes, sample_rate: int = 16000) -> tuple[str, float]:
+        self.load()
+        speaker_id, similarity, is_new = self.tracker.assign(self.embed(pcm, sample_rate))
+        if is_new:
+            logger.info("new_speaker", speaker=speaker_id)
+        return speaker_id, similarity
+
+    def reset(self) -> None:
+        self.tracker.reset()
 
     def get_speaker_count(self) -> int:
-        """Get number of unique speakers identified."""
-        return self._speaker_count
+        return self.tracker.count
 
     def get_speakers(self) -> dict[str, dict]:
-        """Get all identified speakers with metadata."""
-        speakers = {}
-        for speaker_id_data in self._speaker_cache.values():
-            speakers[speaker_id_data["id"]] = speaker_id_data
-        return speakers
+        return self.tracker.speakers()
+
+
+def make_engine(settings: "DiarizationSettings") -> Optional[DiarizationEngine]:
+    return DiarizationEngine(settings) if settings.enabled else None

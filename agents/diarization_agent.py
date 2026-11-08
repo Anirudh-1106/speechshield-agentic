@@ -1,24 +1,31 @@
 """
 DiarizationAgent — Real-time speaker identification.
 
-Receives audio_chunk events, runs speaker diarization, and emits
-speaker_segment events with identified speakers and timestamps.
+Receives speech_segment events, embeds each utterance and matches it to a
+known speaker (or registers a new one), then emits speaker_identified and
+tags the utterance's trace so transcripts, toxicity profiles and rewrite
+strictness are tracked per speaker.
+
+If the embedding model cannot be loaded (missing pyannote, no HF token)
+the agent marks itself degraded and the pipeline continues with a single
+"default" speaker.
 
 Metrics:
   - speechshield_speaker_identification_latency_seconds — Diarization latency
   - speechshield_speaker_changes_total — Speaker change count
-  - speechshield_speakers_active_total — Active speaker count
+  - speechshield_active_speakers — Active speaker count
 """
 
 import asyncio
 import time
-from typing import TYPE_CHECKING
+from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING, Optional
 
+from core.diarization import DiarizationEngine
 from core.event_bus import Event
+from core.health import health_checks
 from core.logging import get_logger
 from core.metrics import metrics
-from core.health import health_checks
-from core.diarization import DiarizationEngine
 
 if TYPE_CHECKING:
     from core.event_bus import EventBus
@@ -26,172 +33,88 @@ if TYPE_CHECKING:
 
 logger = get_logger("agents.diarization_agent")
 
-# Collect audio chunks for diarization window (1 second at 16kHz = 32000 bytes)
-DIARIZATION_WINDOW_SECONDS = 2.0
-SAMPLE_RATE = 16_000
-SAMPLE_WIDTH = 2  # 16-bit
-DIARIZATION_BUFFER_BYTES = int(SAMPLE_RATE * SAMPLE_WIDTH * DIARIZATION_WINDOW_SECONDS)
-
 
 class DiarizationAgent:
-    """Speaker identification agent — identifies speaker changes in real-time."""
+    """Speaker identification agent — one speaker label per utterance."""
 
-    def __init__(self, event_bus: "EventBus", state: "GlobalState") -> None:
+    def __init__(self, event_bus: "EventBus", state: "GlobalState", engine: Optional[DiarizationEngine] = None) -> None:
         self.bus = event_bus
         self.state = state
-        self._engine: DiarizationEngine | None = None
-        self._audio_buffer = bytearray()
+        self.settings = state.settings.diarization
+        self._engine = engine or DiarizationEngine(self.settings)
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="diarization")
         self._running = False
-        self._last_speaker: str | None = None
-        self._speaker_change_count = 0
-
-    # ------------------------------------------------------------------
-    # Model loading (once)
-    # ------------------------------------------------------------------
-
-    def _load_engine(self) -> None:
-        if self._engine is None:
-            logger.info("diarization_engine_loading", model="pyannote/speaker-diarization-3.1")
-            try:
-                self._engine = DiarizationEngine(
-                    model="pyannote/speaker-diarization-3.1",
-                    device="cpu",
-                )
-                logger.info("diarization_engine_loaded")
-            except Exception as e:
-                error_msg = f"Engine load failed: {str(e)}"
-                logger.error("diarization_engine_load_failed", error=str(e))
-                health_checks().mark_error("DiarizationAgent", error_msg)
-                raise
+        self._stopped = asyncio.Event()
+        self._last_speaker: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Subscribe to audio_chunk events."""
-        self._load_engine()
+        self._stopped.clear()
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(self._executor, self._engine.load)
+        except Exception as e:
+            logger.error("diarization_unavailable", error=str(e))
+            health_checks().mark_degraded("DiarizationAgent", f"Disabled: {e}")
+            self.state.system_info["diarization"] = "unavailable"
+            return  # pipeline continues with the default speaker
         self._running = True
-        self.bus.subscribe("audio_chunk", self._handle_audio_chunk)
+        self.bus.subscribe("speech_segment", self._handle_segment)
         health_checks().mark_ready("DiarizationAgent")
-        logger.info(
-            "diarization_agent_started",
-            subscribed_to="audio_chunk",
-            window_seconds=DIARIZATION_WINDOW_SECONDS,
-        )
+        self.state.system_info["diarization"] = self.settings.embedding_model
+        logger.info("diarization_agent_started", subscribed_to="speech_segment")
 
-        # Keep alive until stopped
-        while self._running:
-            await asyncio.sleep(0.1)
+        await self._stopped.wait()
 
     def stop(self) -> None:
         self._running = False
+        self._stopped.set()
         health_checks().mark_starting("DiarizationAgent")
-        if self._engine:
-            self._engine.reset()
+        self._engine.reset()
 
     # ------------------------------------------------------------------
     # Event handler
     # ------------------------------------------------------------------
 
-    async def _handle_audio_chunk(self, event: Event) -> None:
-        audio_bytes: bytes = event.data.get("audio", b"")
-        if not audio_bytes:
+    async def _handle_segment(self, event: Event) -> None:
+        audio: bytes = event.data.get("audio", b"")
+        if not audio:
             return
+        cid = event.correlation_id
+        sample_rate = event.data.get("sample_rate", 16000)
+        duration = len(audio) / 2 / sample_rate
 
-        self._audio_buffer.extend(audio_bytes)
-
-        # Once we have enough audio, run diarization
-        if len(self._audio_buffer) >= DIARIZATION_BUFFER_BYTES:
-            raw = bytes(self._audio_buffer)
-            self._audio_buffer.clear()
-
-            # Run diarization in executor
+        if duration < self.settings.min_segment_seconds and self._last_speaker:
+            # Too short for a reliable voiceprint: assume the same speaker continues.
+            speaker, similarity = self._last_speaker, 0.0
+        else:
             loop = asyncio.get_running_loop()
-            segments = await loop.run_in_executor(
-                None,
-                self._diarize_buffer,
-                raw,
-                event.correlation_id,
-            )
+            start = time.time()
+            try:
+                speaker, similarity = await loop.run_in_executor(self._executor, self._engine.identify, audio, sample_rate)
+            except Exception as e:
+                logger.error("diarization_error", correlation_id=cid, error=str(e), error_type=type(e).__name__)
+                health_checks().mark_degraded("DiarizationAgent", f"Diarization error: {e}")
+                return
+            metrics().speaker_identification_latency_seconds.observe(time.time() - start)
 
-            # Emit speaker_segment events for each identified segment
-            for segment in segments:
-                speaker = segment["speaker"]
-                
-                # Track speaker changes
-                if speaker != self._last_speaker:
-                    self._speaker_change_count += 1
-                    metrics().speaker_changes_total.inc()
-                    logger.info(
-                        "speaker_change_detected",
-                        correlation_id=event.correlation_id,
-                        speaker=speaker,
-                        previous_speaker=self._last_speaker,
-                    )
-                    self._last_speaker = speaker
+        if speaker != self._last_speaker:
+            metrics().speaker_changes_total.inc()
+            logger.info("speaker_change_detected", correlation_id=cid, speaker=speaker, previous_speaker=self._last_speaker)
+            self._last_speaker = speaker
 
-                # Update global state with the latest speaker
-                self.state.current_speaker = speaker
+        self.state.trace(cid).speaker = speaker
+        self.state.current_speaker = speaker
+        stage_ms = self.state.mark_stage(cid, "diarization")
+        metrics().stage_latency_seconds.labels(stage="diarization").observe(stage_ms / 1000.0)
+        metrics().active_speakers.set(self._engine.get_speaker_count())
 
-                # Emit speaker_identified event
-                await self.bus.emit(
-                    Event(
-                        "speaker_identified",
-                        {
-                            "speaker_id": speaker,
-                            "start": segment["start"],
-                            "end": segment["end"],
-                            "confidence": segment["confidence"],
-                            "duration": segment["duration"],
-                            "timestamp": time.time(),
-                        },
-                        correlation_id=event.correlation_id,
-                    )
-                )
-
-            # Update active speakers gauge
-            if self._engine:
-                speaker_count = self._engine.get_speaker_count()
-                metrics().active_speakers.set(speaker_count)
-
-    # ------------------------------------------------------------------
-    # Diarization helper
-    # ------------------------------------------------------------------
-
-    def _diarize_buffer(self, raw_pcm: bytes, correlation_id: str) -> list[dict]:
-        """Synchronous diarization wrapper for executor."""
-        if not self._engine:
-            return []
-
-        start_time = time.time()
-        m = metrics()
-
-        try:
-            segments = asyncio.run(
-                self._engine.diarize(raw_pcm, sample_rate=SAMPLE_RATE, min_duration=0.3)
-            )
-
-            elapsed = time.time() - start_time
-            m.speaker_identification_latency_seconds.observe(elapsed)
-
-            logger.debug(
-                "diarization_segments",
-                correlation_id=correlation_id,
-                segments_count=len(segments),
-                duration_ms=int(elapsed * 1000),
-            )
-
-            return segments
-
-        except Exception as e:
-            elapsed = time.time() - start_time
-            logger.error(
-                "diarization_error",
-                correlation_id=correlation_id,
-                error=str(e),
-                error_type=type(e).__name__,
-                duration_ms=int(elapsed * 1000),
-            )
-            health_checks().mark_error("DiarizationAgent", f"Diarization error: {str(e)}")
-            return []
+        await self.bus.emit(Event("speaker_identified", {
+            "speaker_id": speaker,
+            "confidence": round(float(similarity), 3),
+            "duration": duration,
+            "timestamp": time.time(),
+        }, correlation_id=cid))
