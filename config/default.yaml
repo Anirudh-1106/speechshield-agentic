@@ -1,6 +1,6 @@
 # Default SpeechShield Configuration
 # All values are overridable via environment variables (SPEECHSHIELD_*)
-# or environment-specific YAML files.
+# or environment-specific YAML files. See CONFIG.md for every option.
 
 env: dev
 debug: false
@@ -12,30 +12,58 @@ audio:
   input_device: null
   output_device: null
   queue_size: 200
+  silence_threshold: 300.0
+  capture_enabled: true
+
+segmenter:
+  min_silence_ms: 400
+  max_segment_seconds: 4.0
+  min_speech_ms: 250
+  pre_roll_ms: 200
+  noise_multiplier: 3.0
 
 asr:
-  model_size: small
+  model_size: auto  # small on GPU (~0.25 s/utterance), base.en on CPU (~1 s)
   model_dir: models/
+  device: auto
+  compute_type: auto
+  cpu_threads: 0
+  beam_size: 1
+  language: en
   timeout_seconds: 30.0
+  vad_filter: true
+  vad_min_silence_ms: 500
+  word_timestamps: true
+  no_speech_threshold: 0.6
+  min_avg_logprob: -1.0
 
 toxicity:
-  model_name: models/toxic-bert
+  model_name: unitary/toxic-bert
   threshold: 0.5
   timeout_seconds: 5.0
+  quantize: true
+  num_threads: 0
+  keyword_safety_net: true
 
 rewrite:
   llm_provider: ollama
   ollama_base_url: http://localhost:11434
-  model: gemma:1b
+  openai_base_url: https://api.openai.com/v1
+  model: qwen2.5:3b
   timeout_seconds: 10.0
   max_retries: 2
   fallback_enabled: true
+  context_turns: 3
+  keep_alive: 30m
+  circuit_breaker_failures: 3
+  circuit_breaker_cooldown_seconds: 30.0
 
 voice:
   provider: edge_tts
   voice: en-US-GuyNeural
   timeout_seconds: 15.0
   play_audio: true
+  speak_clean: true
   virtual_device_support: false
 
 pipeline:
@@ -43,6 +71,9 @@ pipeline:
   default_rewrite_strictness: 1.0
   latency_window_size: 100
   graceful_shutdown_timeout: 10.0
+  subscriber_queue_size: 256
+  max_agent_restarts: 5
+  restart_backoff_seconds: 1.0
 
 logging:
   level: INFO
@@ -55,3 +86,46 @@ dashboard:
   port: 8501
   refresh_interval: 1.0
   max_rows: 500
+
+server:
+  enabled: true
+  host: 127.0.0.1
+  port: 9501
+  api_key: null
+  max_text_length: 2000
+  rate_limit_per_minute: 120
+
+interceptor:
+  enabled: false
+  delay_seconds: 0.8
+  max_hold_seconds: 4.0
+  input_device_name: CABLE Output
+  output_device_name: ""
+  censor_mode: bleep          # bleep | mute | voice_clone | tts
+  streaming: auto             # word-by-word release while the speaker talks (auto = on with GPU ASR)
+  partial_interval_seconds: 0.5
+  commit_guard_seconds: 0.3
+  clone_timeout_seconds: 2.0
+  fail_mode: closed
+  word_padding_ms: 60
+  bleep_frequency_hz: 1000.0
+  bleep_volume: 0.15
+
+voice_clone:
+  python: .venv-voice/Scripts/python.exe
+  host: 127.0.0.1
+  port: 9502
+  autostart: true
+  model: turbo
+  device: cuda
+  min_reference_seconds: 6.0
+  max_reference_seconds: 15.0
+  request_timeout_seconds: 8.0
+
+diarization:
+  enabled: false
+  embedding_model: pyannote/wespeaker-voxceleb-resnet34-LM
+  hf_token: null
+  similarity_threshold: 0.5
+  max_speakers: 8
+  min_segment_seconds: 0.8

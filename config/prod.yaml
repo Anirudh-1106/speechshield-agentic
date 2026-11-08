@@ -5,10 +5,13 @@ env: prod
 debug: false
 
 audio:
-  chunk_size: 2048  # Larger chunks for better throughput
+  chunk_size: 1024  # 64 ms frames: fine-grained enough for word-level bleeping
+
+segmenter:
+  min_silence_ms: 300  # Close utterances sooner -> lower latency
 
 asr:
-  model_size: base  # Faster, more optimized for production
+  model_size: auto
   timeout_seconds: 15.0  # Stricter timeout
 
 toxicity:
@@ -32,3 +35,6 @@ logging:
 dashboard:
   refresh_interval: 2.0  # Less frequent updates to reduce load
   max_rows: 1000
+
+interceptor:
+  fail_mode: closed  # Never leak unjudged audio in production

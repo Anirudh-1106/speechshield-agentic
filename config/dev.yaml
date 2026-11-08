@@ -5,7 +5,7 @@ env: dev
 debug: true
 
 audio:
-  chunk_size: 512  # Smaller chunks for faster feedback during development
+  chunk_size: 512  # 32 ms frames for snappier segmentation during development
 
 asr:
   timeout_seconds: 60.0  # More lenient in dev

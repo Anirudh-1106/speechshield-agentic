@@ -29,3 +29,9 @@ logging:
 dashboard:
   enabled: false  # Disable dashboard during tests
   refresh_interval: 10.0
+
+server:
+  enabled: false
+
+voice:
+  play_audio: false
