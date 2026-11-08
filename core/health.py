@@ -8,10 +8,10 @@ Provides:
 
 Usage:
     from core.health import health_checks
-    
+
     health_checks.mark_ready("ASRAgent")
     health_checks.mark_error("Ollama", "Connection refused")
-    
+
     status = health_checks.get_status()
     print(status)  # {'ready': True, 'components': {...}}
 """

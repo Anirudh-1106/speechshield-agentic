@@ -18,7 +18,7 @@ Usage:
 import logging
 import sys
 import os
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 import structlog
 
 _logger_configured = False
@@ -54,7 +54,7 @@ def configure_logging(
     os.makedirs(log_dir, exist_ok=True)
 
     # Configure Python's standard logging
-    stdlib_handlers = [logging.StreamHandler(sys.stdout)]
+    stdlib_handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
 
     if enable_file_logging:
         stdlib_handlers.append(
@@ -71,7 +71,7 @@ def configure_logging(
     )
 
     # Configure structlog
-    processors = [
+    processors: list[Any] = [
         structlog.stdlib.filter_by_level,
         structlog.stdlib.add_logger_name,
         structlog.stdlib.add_log_level,
@@ -97,6 +97,12 @@ def configure_logging(
         logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True,
     )
+
+    # Third-party libraries are chatty at DEBUG (every HTTP request, every
+    # weight tensor); keep them at WARNING unless something goes wrong.
+    for noisy in ("httpx", "httpcore", "urllib3", "asyncio", "multipart", "numba", "matplotlib",
+                  "transformers", "huggingface_hub", "faster_whisper", "filelock", "websockets"):
+        logging.getLogger(noisy).setLevel(max(logging.WARNING, getattr(logging, level)))
 
     _logger_configured = True
 
