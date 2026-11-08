@@ -1,145 +1,119 @@
 """
-AudioAgent — Captures live microphone audio and emits audio_chunk events.
+AudioAgent — Captures live microphone audio and emits speech_segment events.
 
-Uses PyAudio in a non-blocking callback mode at 16 kHz mono.
+Uses PyAudio in non-blocking callback mode at 16 kHz mono.  Chunks are
+fed through the ``UtteranceSegmenter`` so downstream agents receive whole
+utterances that end at a natural pause — one correlation ID per utterance.
 """
 
 import asyncio
-import logging
+import time
 from typing import TYPE_CHECKING
 
-import numpy as np
-import pyaudio
+from core.audio_io import AsyncCapture, find_device, _pyaudio
+from core.event_bus import Event
+from core.health import health_checks
+from core.logging import get_logger
+from core.metrics import metrics
+from core.segmenter import SpeechSegment, UtteranceSegmenter
 
 if TYPE_CHECKING:
     from core.event_bus import EventBus
     from core.state import GlobalState
 
-from core.event_bus import Event
-
-logger = logging.getLogger("AudioAgent")
-
-SAMPLE_RATE = 16_000
-CHANNELS = 1
-FORMAT = pyaudio.paInt16
-CHUNK = 1024
+logger = get_logger("agents.audio_agent")
 
 
 class AudioAgent:
-    """Microphone capture agent — streams audio_chunk events onto the bus."""
+    """Microphone capture agent — streams utterances onto the bus."""
 
     def __init__(self, event_bus: "EventBus", state: "GlobalState") -> None:
         self.bus = event_bus
         self.state = state
-        self._pa: pyaudio.PyAudio | None = None
-        self._stream: pyaudio.Stream | None = None
-        self._buffer: asyncio.Queue[bytes] = asyncio.Queue(maxsize=200)
+        cfg = state.settings
+        self.sample_rate = cfg.audio.sample_rate
+        self._segmenter = UtteranceSegmenter(
+            cfg.segmenter,
+            sample_rate=self.sample_rate,
+            silence_threshold=cfg.audio.silence_threshold,
+        )
+        self._capture: AsyncCapture | None = None
         self._running = False
+        self._seq = 0
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Open the mic stream and continuously emit audio_chunk events."""
+        """Open the mic stream and continuously emit speech_segment events."""
         self._running = True
-        self._pa = pyaudio.PyAudio()
+        cfg = self.state.settings.audio
 
-        # Choose default input device
-        dev_info = self._pa.get_default_input_device_info()
-        logger.info(
-            "Using input device: %s (index %s)",
-            dev_info.get("name"),
-            dev_info.get("index"),
-        )
+        pyaudio = _pyaudio()
+        pa = pyaudio.PyAudio()
+        try:
+            device = find_device(pa, None, is_input=True, index=cfg.input_device) if cfg.input_device is not None else None
+            info = pa.get_device_info_by_index(device) if device is not None else pa.get_default_input_device_info()
+        finally:
+            pa.terminate()
+        logger.info("audio_input_device", name=info.get("name"), index=info.get("index"))
 
-        self._stream = self._pa.open(
-            format=FORMAT,
-            channels=CHANNELS,
-            rate=SAMPLE_RATE,
-            input=True,
-            frames_per_buffer=self.state.settings.audio.chunk_size,
-            stream_callback=self._audio_callback,
+        self._capture = AsyncCapture(
+            sample_rate=self.sample_rate,
+            chunk_size=cfg.chunk_size,
+            device_index=device,
+            queue_size=cfg.queue_size,
         )
-        self._stream.start_stream()
-        logger.info("AudioAgent started — streaming mic audio.")
+        self._capture.open()
+        health_checks().mark_ready("AudioAgent")
+        logger.info("audio_agent_started", sample_rate=self.sample_rate, chunk_size=cfg.chunk_size)
 
         try:
             while self._running:
-                try:
-                    chunk = await asyncio.wait_for(self._buffer.get(), timeout=0.2)
-                except asyncio.TimeoutError:
+                item = await self._capture.read(timeout=0.2)
+                if item is None:
                     continue
-
-                await self.bus.emit(
-                    Event("audio_chunk", {
-                        "audio": chunk, 
-                        "sample_rate": SAMPLE_RATE,
-                        "speaker": getattr(self.state, "current_speaker", "default"),
-                    })
-                )
+                chunk, t = item
+                self._seq += 1
+                result = self._segmenter.process(chunk, self._seq, t)
+                if result.discarded:
+                    metrics().audio_chunks_dropped_total.labels(reason="too_short").inc()
+                if result.closed:
+                    await self._emit_segment(result.closed)
+                metrics().audio_queue_depth_samples.set(self._capture.backlog)
         except asyncio.CancelledError:
-            logger.info("AudioAgent cancelled.")
+            logger.info("audio_agent_cancelled")
+            raise
         finally:
+            flushed = self._segmenter.flush()
+            if flushed.closed:
+                await self._emit_segment(flushed.closed)
             self._cleanup()
 
     def stop(self) -> None:
         self._running = False
 
-    # ------------------------------------------------------------------
-    # PyAudio callback (runs in a separate thread)
-    # ------------------------------------------------------------------
-
-    def _audio_callback(
-        self,
-        in_data: bytes | None,
-        frame_count: int,
-        time_info: dict,
-        status_flags: int,
-    ) -> tuple[None, int]:
-        if in_data is not None:
-            # Convert to numpy array to calculate RMS
-            audio_data = np.frombuffer(in_data, dtype=np.int16)
-            rms = np.sqrt(np.mean(np.square(audio_data.astype(np.float32))))
-
-            # Get silence threshold from config (default 500.0 if not set)
-            silence_threshold = getattr(self.state.settings.audio, "silence_threshold", 500.0)
-
-            if rms < silence_threshold:
-                # Dropped chunk due to silence
-                from core.metrics import metrics
-                metrics().audio_chunks_dropped_total.labels(reason="silence").inc()
-            else:
-                try:
-                    self._buffer.put_nowait(in_data)
-                except asyncio.QueueFull:
-                    # Drop oldest chunk to keep real-time
-                    try:
-                        self._buffer.get_nowait()
-                    except asyncio.QueueEmpty:
-                        pass
-                    try:
-                        self._buffer.put_nowait(in_data)
-                    except asyncio.QueueFull:
-                        pass
-        return (None, pyaudio.paContinue)
+    async def _emit_segment(self, seg: SpeechSegment) -> None:
+        trace = self.state.trace(seg.segment_id)
+        trace.speech_end = time.time()
+        trace.speech_duration = seg.duration_seconds
+        logger.debug("speech_segment", correlation_id=seg.segment_id, seconds=round(seg.duration_seconds, 2), forced=seg.forced)
+        await self.bus.emit(Event("speech_segment", {
+            "audio": seg.audio,
+            "sample_rate": self.sample_rate,
+            "start_time": seg.start_time,
+            "end_time": seg.end_time,
+            "duration": seg.duration_seconds,
+            "forced": seg.forced,
+        }, correlation_id=seg.segment_id))
 
     # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
 
     def _cleanup(self) -> None:
-        if self._stream is not None:
-            try:
-                self._stream.stop_stream()
-                self._stream.close()
-            except Exception:
-                pass
-            self._stream = None
-        if self._pa is not None:
-            try:
-                self._pa.terminate()
-            except Exception:
-                pass
-            self._pa = None
-        logger.info("AudioAgent cleaned up.")
+        if self._capture is not None:
+            self._capture.close()
+            self._capture = None
+        logger.info("audio_agent_cleaned_up")
