@@ -1,0 +1,67 @@
+# One-command deployment of the moderation API + local LLM + dashboard.
+#
+#   docker compose up -d          # first start pulls the LLM (~2 GB)
+#   curl -s localhost:9501/v1/moderate -H 'content-type: application/json' \
+#        -d '{"text":"you are a stupid idiot"}'
+#   open http://localhost:8501    # dashboard
+#
+# Set SPEECHSHIELD_API_KEY in a .env file next to this one to require
+# "Authorization: Bearer <key>" on /v1/* endpoints.
+
+services:
+  ollama:
+    image: ollama/ollama:0.5.7
+    volumes:
+      - ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  ollama-pull:
+    image: ollama/ollama:0.5.7
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: ollama:11434
+    entrypoint: ["ollama", "pull", "${SPEECHSHIELD_REWRITE_MODEL:-qwen2.5:3b}"]
+    restart: "no"
+
+  speechshield:
+    build: .
+    image: speechshield:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      SPEECHSHIELD_OLLAMA_BASE_URL: http://ollama:11434
+      SPEECHSHIELD_REWRITE_MODEL: ${SPEECHSHIELD_REWRITE_MODEL:-qwen2.5:3b}
+      SPEECHSHIELD_API_KEY: ${SPEECHSHIELD_API_KEY:-}
+    ports:
+      - "9501:9501"
+    volumes:
+      - models:/app/models
+    restart: unless-stopped
+
+  dashboard:
+    image: speechshield:latest
+    depends_on:
+      - speechshield
+    environment:
+      SPEECHSHIELD_STATE_URL: http://speechshield:9501/v1/state
+      SPEECHSHIELD_API_KEY: ${SPEECHSHIELD_API_KEY:-}
+    command: ["python", "-m", "streamlit", "run", "dashboard.py",
+              "--server.port", "8501", "--server.address", "0.0.0.0",
+              "--server.headless", "true", "--browser.gatherUsageStats", "false"]
+    ports:
+      - "8501:8501"
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+
+volumes:
+  ollama:
+  models:
