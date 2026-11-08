@@ -1,404 +1,214 @@
-# Configuration System — SpeechShield v2
-
-## Overview
-
-SpeechShield v2 uses a **centralized, environment-aware configuration system** built on:
-
-- **Pydantic v2** for type-safe validation
-- **YAML files** for readable config management
-- **Environment variables** for 12-factor app compliance
-- **Environment profiles** (dev/test/prod) for workflow-specific settings
-
-## Quick Start
-
-### Default Behavior (Development)
-
-```bash
-python main.py
-```
-
-Loads `config/dev.yaml` (relaxed thresholds, DEBUG logging).
-
-### Production
-
-```bash
-export SPEECHSHIELD_ENV=prod
-python main.py
-```
-
-Loads `config/prod.yaml` (strict thresholds, optimized latency).
-
-### Environment Variable Overrides
-
-```bash
-export SPEECHSHIELD_TOXICITY_THRESHOLD=0.8
-export SPEECHSHIELD_LATENCY_BUDGET=250
-python main.py
-```
-
-Environment variables override YAML files.
-
-## Configuration Structure
-
-### Audio Settings
-
-```yaml
-audio:
-  sample_rate: 16000           # Hz
-  channels: 1                   # Mono
-  chunk_size: 1024              # Samples per chunk
-  input_device: null            # null = default device
-  output_device: null           # null = default device
-  queue_size: 200               # Max buffered chunks
-```
-
-**Environment Variables:**
-- `SPEECHSHIELD_SAMPLE_RATE=48000`
-- `SPEECHSHIELD_CHANNELS=2`
-- `SPEECHSHIELD_CHUNK_SIZE=2048`
-- `SPEECHSHIELD_INPUT_DEVICE=1`
-- `SPEECHSHIELD_AUDIO_QUEUE_SIZE=300`
-
-### ASR (Speech Recognition) Settings
-
-```yaml
-asr:
-  model_size: small             # tiny, base, small, medium, large
-  model_dir: models/            # Cache directory
-  timeout_seconds: 30.0         # Max inference time
-```
-
-**Environment Variables:**
-- `SPEECHSHIELD_ASR_MODEL_SIZE=base`
-- `SPEECHSHIELD_ASR_TIMEOUT=60`
-
-### Toxicity Detection Settings
-
-```yaml
-toxicity:
-  model_name: models/toxic-bert
-  threshold: 0.5                # 0-1 scale
-  timeout_seconds: 5.0
-```
-
-**Environment Variables:**
-- `SPEECHSHIELD_TOXICITY_THRESHOLD=0.6`
-- `SPEECHSHIELD_TOXICITY_TIMEOUT=10`
-
-### LLM Rewriting Settings
-
-```yaml
-rewrite:
-  llm_provider: ollama          # ollama, openai, local
-  ollama_base_url: http://localhost:11434
-  model: gemma:1b
-  timeout_seconds: 10.0
-  max_retries: 2                # Retry failed rewrites
-  fallback_enabled: true        # Fall back to rules if LLM fails
-```
-
-**Environment Variables:**
-- `SPEECHSHIELD_REWRITE_PROVIDER=openai`
-- `SPEECHSHIELD_REWRITE_MODEL=gpt-4-turbo`
-- `SPEECHSHIELD_OLLAMA_BASE_URL=http://localhost:8000`
-- `SPEECHSHIELD_REWRITE_TIMEOUT=5`
-- `SPEECHSHIELD_REWRITE_MAX_RETRIES=1`
-
-### Text-to-Speech Settings
-
-```yaml
-voice:
-  provider: edge_tts            # edge_tts, espeak, pyttsx3
-  voice: en-US-GuyNeural        # Edge TTS voice ID
-  timeout_seconds: 15.0
-  play_audio: true              # Enable playback
-  virtual_device_support: false # VB-Cable, etc (Phase 3)
-```
-
-**Environment Variables:**
-- `SPEECHSHIELD_TTS_VOICE=en-US-AriaNeural`
-- `SPEECHSHIELD_PLAY_AUDIO=false`
-- `SPEECHSHIELD_VIRTUAL_DEVICE=true`
-
-### Pipeline Settings
-
-```yaml
-pipeline:
-  latency_budget_ms: 500.0          # Target latency
-  default_rewrite_strictness: 1.0   # 1.0 = normal
-  latency_window_size: 100          # Tracking window
-  graceful_shutdown_timeout: 10.0
-```
-
-**Environment Variables:**
-- `SPEECHSHIELD_LATENCY_BUDGET=300`
-- `SPEECHSHIELD_STRICTNESS=1.2`
-
-### Logging Settings
-
-```yaml
-logging:
-  level: INFO                   # DEBUG, INFO, WARNING, ERROR, CRITICAL
-  log_dir: logs/
-  format: text                  # text or json (Phase 2)
-  enable_file_logging: true
-```
-
-**Environment Variables:**
-- `SPEECHSHIELD_LOG_LEVEL=DEBUG`
-- `SPEECHSHIELD_LOG_FORMAT=json`
-
-### Dashboard Settings
-
-```yaml
-dashboard:
-  enabled: true
-  port: 8501
-  refresh_interval: 1.0         # Seconds
-  max_rows: 500                 # Max feed items
-```
-
-**Environment Variables:**
-- `SPEECHSHIELD_DASHBOARD_ENABLED=false`
-- `SPEECHSHIELD_DASHBOARD_PORT=8080`
-
-## Configuration Priority
-
-Settings are loaded in this priority order (highest to lowest):
-
-1. **Environment Variables** (`SPEECHSHIELD_*`)
-2. **Environment-Specific YAML** (`config/{ENV}.yaml`)
-3. **Default YAML** (`config/default.yaml`)
-4. **Pydantic Defaults** (hard-coded in `config/settings.py`)
-
-### Example Resolution
-
-If you set:
-```bash
-export SPEECHSHIELD_TOXICITY_THRESHOLD=0.8
-```
-
-With `config/dev.yaml` inheriting from `config/default.yaml`:
-
-```
-default.yaml → toxicity.threshold = 0.5
-dev.yaml → toxicity.threshold = 0.5 (inherited)
-env var → SPEECHSHIELD_TOXICITY_THRESHOLD=0.8 (WINS)
-```
-
-Final value: **0.8**
-
-## Environment Profiles
-
-### Development (`dev`)
-
-- **Purpose:** Local development with fast feedback
-- **Key Settings:**
-  - `debug: true`
-  - `logging.level: DEBUG`
-  - `pipeline.latency_budget_ms: 1000.0` (relaxed)
-  - `dashboard.refresh_interval: 0.5` (responsive)
-
-### Testing (`test`)
-
-- **Purpose:** CI/CD and automated testing
-- **Key Settings:**
-  - `debug: false`
-  - `logging.level: WARNING`
-  - `dashboard.enabled: false`
-  - `pipeline.latency_budget_ms: 5000.0` (very relaxed for CI)
-
-### Production (`prod`)
-
-- **Purpose:** Real-time voice moderation in production
-- **Key Settings:**
-  - `debug: false`
-  - `logging.level: WARNING`
-  - `logging.format: json` (structured logging)
-  - `asr.model_size: base` (faster)
-  - `pipeline.latency_budget_ms: 300.0` (strict)
-  - `toxicity.threshold: 0.6` (higher, fewer false positives)
-
-## Using Configuration in Code
-
-### Loading Settings
-
-```python
-from config.settings import settings
-
-config = settings()  # Lazy-loaded singleton
-
-print(config.env)
-print(config.audio.sample_rate)
-print(config.pipeline.latency_budget_ms)
-```
-
-### Passing to GlobalState
-
-```python
-from config.settings import settings
-from core.state import GlobalState
-
-config = settings()
-state = GlobalState(settings=config)
-
-# Now state.config has all the values
-print(state.config["latency_budget_ms"])
-```
-
-### Accessing in Agents
-
-Agents receive `state` which contains settings:
-
-```python
-class MyAgent:
-    def __init__(self, bus: EventBus, state: GlobalState):
-        self.state = state
-        self.timeout = state.settings.asr.timeout_seconds
-        self.threshold = state.settings.toxicity.threshold
-```
-
-### Testing with Different Configs
-
-```python
-from config.settings import load_config
-
-# Load test config
-config = load_config(env="test")
-assert config.dashboard.enabled is False
-
-# Load prod config
-config = load_config(env="prod")
-assert config.pipeline.latency_budget_ms == 300.0
-```
-
-## Creating Custom Configs
-
-### Example: Custom Staging Config
-
-Create `config/staging.yaml`:
-
-```yaml
-env: staging
-debug: false
-
-audio:
-  chunk_size: 1024
-
-asr:
-  model_size: medium
-  timeout_seconds: 20.0
-
-toxicity:
-  threshold: 0.55
-
-pipeline:
-  latency_budget_ms: 400.0
-
-logging:
-  level: INFO
-  format: json
-```
-
-Then run:
-
-```bash
-export SPEECHSHIELD_ENV=staging
-python main.py
-```
-
-## Validation
-
-Pydantic automatically validates all settings:
-
-```python
-# This will raise ValueError
-export SPEECHSHIELD_TOXICITY_THRESHOLD=1.5  # Must be 0-1
-python main.py
-
-# This will raise ValueError
-export SPEECHSHIELD_LATENCY_BUDGET=50  # Must be >= 100
-python main.py
-```
-
-## Debugging Configuration
-
-### Print Current Config
-
-```bash
-python -c "from config.settings import settings; import json; print(json.dumps(settings().to_dict(), indent=2))"
-```
-
-### Verbose Config Loading
-
-```bash
-export SPEECHSHIELD_LOG_LEVEL=DEBUG
-python main.py
-```
-
-Look for log lines like:
-```
-Loading config for environment: dev
-Loaded default config from .../config/default.yaml
-Merged dev config from .../config/dev.yaml
-Configuration loaded: env=dev debug=True
-```
-
-### Check Environment Variable Overrides
-
-```bash
-export SPEECHSHIELD_TOXICITY_THRESHOLD=0.8
-export SPEECHSHIELD_LOG_LEVEL=DEBUG
-python -c "
-from config.settings import settings
-cfg = settings()
-print(f'Threshold: {cfg.toxicity.threshold}')
-print(f'Log Level: {cfg.logging.level}')
-"
-```
-
-## Migration from Hardcoded Constants
-
-### Before (Phase 0)
-
-```python
-# Scattered hardcoded constants
-TOXICITY_THRESHOLD = 0.5
-LATENCY_BUDGET_MS = 500.0
-SAMPLE_RATE = 16000
-VOICE = "en-US-GuyNeural"
-```
-
-### After (Phase 1)
-
-```python
-from config.settings import settings
-
-config = settings()
-print(config.toxicity.threshold)
-print(config.pipeline.latency_budget_ms)
-print(config.audio.sample_rate)
-print(config.voice.voice)
-```
-
-All values are now:
-- **Configurable** via YAML or env vars
-- **Environment-specific** (dev/prod differences)
-- **Type-safe** (Pydantic validation)
-- **Documented** (inline docstrings)
-
-## Next Steps
-
-**Phase 2** will add structured logging and metrics that leverage this configuration:
-
-```python
-from config.settings import settings
-
-config = settings()
-logger = setup_structured_logging(
-    level=config.logging.level,
-    format=config.logging.format,
-)
-```
-
-The configuration system is now the foundation for all future phases.
+# SpeechShield configuration reference
+
+<!-- Generated by scripts/gen_config_docs.py — edit the Field descriptions in
+     config/settings.py, not this file. -->
+
+Settings are resolved in this order (highest wins):
+
+1. Command-line flags (`python main.py --help`)
+2. Environment variables (`SPEECHSHIELD_*`, see the *Env var* column)
+3. `config/<env>.yaml` — `dev`, `test` or `prod`, chosen by `SPEECHSHIELD_ENV`
+4. `config/default.yaml`
+5. The defaults below
+
+Every value is validated on start-up; an invalid value stops the program
+with a message naming the field.
+
+
+## `audio`
+
+Audio configuration.
+
+| Key | Type | Default | Range | Env var | Description |
+|---|---|---|---|---|---|
+| `sample_rate` | int | `16000` |  | `SPEECHSHIELD_SAMPLE_RATE` | Audio sample rate in Hz |
+| `channels` | int | `1` |  | `SPEECHSHIELD_CHANNELS` | Number of audio channels (mono) |
+| `chunk_size` | int | `1024` |  | `SPEECHSHIELD_CHUNK_SIZE` | Audio chunk size in samples |
+| `input_device` | int \| null | `null` |  | `SPEECHSHIELD_INPUT_DEVICE` | Input device index (None = default) |
+| `output_device` | int \| null | `null` |  | `SPEECHSHIELD_OUTPUT_DEVICE` | Output device index (None = default) |
+| `queue_size` | int | `200` |  | `SPEECHSHIELD_AUDIO_QUEUE_SIZE` | Max size of audio chunk queue |
+| `silence_threshold` | float | `300.0` | ≥ 0.0 | `SPEECHSHIELD_SILENCE_THRESHOLD` | Minimum RMS (int16 scale) for a frame to count as speech. The segmenter adapts above this floor to the measured noise level. |
+| `capture_enabled` | bool | `True` |  | `SPEECHSHIELD_CAPTURE_ENABLED` | Capture audio at all. Disable for headless/API-only deployments (e.g. Docker). |
+
+## `segmenter`
+
+Voice-activity based utterance segmentation. Audio is cut into utterances at natural pauses instead of fixed windows, so ASR never sees half-words and every utterance carries a single correlation ID end-to-end.
+
+| Key | Type | Default | Range | Env var | Description |
+|---|---|---|---|---|---|
+| `min_silence_ms` | int | `400` | ≥ 50 | `SPEECHSHIELD_SEGMENT_MIN_SILENCE_MS` | Silence needed to close an utterance |
+| `max_segment_seconds` | float | `4.0` | ≥ 1.0, ≤ 30.0 | `SPEECHSHIELD_SEGMENT_MAX_SECONDS` | Force-close utterances longer than this |
+| `min_speech_ms` | int | `250` | ≥ 0 |  | Discard utterances with less voiced audio than this (clicks, coughs) |
+| `pre_roll_ms` | int | `200` | ≥ 0 |  | Audio kept from before speech onset so first syllables are not clipped |
+| `noise_multiplier` | float | `3.0` | ≥ 1.0 |  | Speech threshold = max(silence_threshold, noise_floor * noise_multiplier) |
+
+## `asr`
+
+Automatic Speech Recognition configuration.
+
+| Key | Type | Default | Range | Env var | Description |
+|---|---|---|---|---|---|
+| `model_size` | `auto` \| `tiny` \| `tiny.en` \| `base` \| `base.en` \| `small` \| `small.en` \| `medium` \| `medium.en` \| `large` \| `large-v3` \| `distil-small.en` \| `distil-medium.en` \| `distil-large-v3` \| `turbo` | `auto` |  | `SPEECHSHIELD_ASR_MODEL_SIZE` | Faster-Whisper model (auto = small on GPU, base.en on CPU) |
+| `model_dir` | str | `models/` |  | `SPEECHSHIELD_ASR_MODEL_DIR` | Directory where ASR models are cached |
+| `device` | `cpu` \| `cuda` \| `auto` | `auto` |  | `SPEECHSHIELD_ASR_DEVICE` | Inference device (auto = cuda if available) |
+| `compute_type` | str | `auto` |  | `SPEECHSHIELD_ASR_COMPUTE_TYPE` | CTranslate2 compute type (auto = int8 on CPU, float16 on GPU) |
+| `cpu_threads` | int | `0` | ≥ 0 | `SPEECHSHIELD_ASR_CPU_THREADS` | CPU threads for CTranslate2 (0 = library default) |
+| `beam_size` | int | `1` | ≥ 1 |  | Beam size (1 = greedy, fastest) |
+| `language` | str \| null | `en` |  |  | Spoken language (None = auto-detect, slower) |
+| `timeout_seconds` | float | `30.0` |  | `SPEECHSHIELD_ASR_TIMEOUT` | ASR inference timeout |
+| `vad_filter` | bool | `True` |  |  | Enable Whisper VAD filter |
+| `vad_min_silence_ms` | int | `500` |  |  | Whisper VAD min silence duration |
+| `word_timestamps` | bool | `True` |  |  | Emit per-word timings (needed to bleep individual words in interceptor mode) |
+| `no_speech_threshold` | float | `0.6` | ≥ 0.0, ≤ 1.0 |  | Drop segments Whisper thinks are not speech (hallucination guard) |
+| `min_avg_logprob` | float | `-1.0` |  |  | Drop low-confidence segments below this average log-probability |
+
+## `toxicity`
+
+Toxicity detection configuration.
+
+| Key | Type | Default | Range | Env var | Description |
+|---|---|---|---|---|---|
+| `model_name` | str | `unitary/toxic-bert` |  | `SPEECHSHIELD_TOXICITY_MODEL` | HuggingFace model ID or local path for toxicity detection |
+| `threshold` | float | `0.5` | ≥ 0.0, ≤ 1.0 | `SPEECHSHIELD_TOXICITY_THRESHOLD` | Toxicity score threshold (0-1) |
+| `timeout_seconds` | float | `5.0` |  | `SPEECHSHIELD_TOXICITY_TIMEOUT` | Toxicity inference timeout |
+| `quantize` | bool | `True` |  | `SPEECHSHIELD_TOXICITY_QUANTIZE` | Apply dynamic int8 quantization on CPU (~2x faster, negligible accuracy loss) |
+| `num_threads` | int | `0` | ≥ 0 |  | Torch intra-op threads (0 = library default) |
+| `keyword_safety_net` | bool | `True` |  |  | Flag known slurs/profanity even if the model under-scores them |
+
+## `rewrite`
+
+Text rewriting configuration.
+
+| Key | Type | Default | Range | Env var | Description |
+|---|---|---|---|---|---|
+| `llm_provider` | `ollama` \| `openai` \| `local` | `ollama` |  | `SPEECHSHIELD_REWRITE_PROVIDER` | LLM backend: ollama, openai (any OpenAI-compatible server), or local (rules only) |
+| `ollama_base_url` | str | `http://localhost:11434` |  | `SPEECHSHIELD_OLLAMA_BASE_URL` | Ollama server URL |
+| `openai_base_url` | str | `https://api.openai.com/v1` |  | `SPEECHSHIELD_OPENAI_BASE_URL` | OpenAI-compatible base URL (OpenAI, LM Studio, vLLM, llama.cpp server …) |
+| `openai_api_key` | str \| null | `null` |  | `SPEECHSHIELD_OPENAI_API_KEY` | API key for the OpenAI-compatible backend (prefer the env var) |
+| `model` | str | `qwen2.5:3b` |  | `SPEECHSHIELD_REWRITE_MODEL` | Model name. For Ollama, falls back to any installed model if missing. |
+| `timeout_seconds` | float | `10.0` |  | `SPEECHSHIELD_REWRITE_TIMEOUT` | Rewrite inference timeout |
+| `max_retries` | int | `2` | ≥ 0 | `SPEECHSHIELD_REWRITE_MAX_RETRIES` | Max rewrite retry attempts |
+| `fallback_enabled` | bool | `True` |  | `SPEECHSHIELD_REWRITE_FALLBACK` | Enable fallback to rules if LLM fails |
+| `context_turns` | int | `3` | ≥ 0, ≤ 20 | `SPEECHSHIELD_REWRITE_CONTEXT_TURNS` | Previous utterances from the same speaker given to the LLM as context |
+| `keep_alive` | str | `30m` |  |  | How long Ollama keeps the model loaded between requests |
+| `circuit_breaker_failures` | int | `3` | ≥ 1 |  | Consecutive LLM failures before the circuit opens (rules-only) |
+| `circuit_breaker_cooldown_seconds` | float | `30.0` | ≥ 1.0 |  | How long the circuit stays open before retrying the LLM |
+
+## `voice`
+
+Text-to-Speech configuration.
+
+| Key | Type | Default | Range | Env var | Description |
+|---|---|---|---|---|---|
+| `provider` | `edge_tts` \| `espeak` \| `pyttsx3` | `edge_tts` |  | `SPEECHSHIELD_TTS_PROVIDER` | TTS provider |
+| `voice` | str | `en-US-GuyNeural` |  | `SPEECHSHIELD_TTS_VOICE` | Edge TTS voice ID |
+| `timeout_seconds` | float | `15.0` |  | `SPEECHSHIELD_TTS_TIMEOUT` | TTS synthesis timeout |
+| `play_audio` | bool | `True` |  | `SPEECHSHIELD_PLAY_AUDIO` | Enable audio playback |
+| `speak_clean` | bool | `True` |  | `SPEECHSHIELD_SPEAK_CLEAN` | Standard mode: also speak clean utterances (False = only speak rewrites) |
+| `virtual_device_support` | bool | `False` |  | `SPEECHSHIELD_VIRTUAL_DEVICE` | Support virtual audio devices (VB-Cable, etc) |
+
+## `pipeline`
+
+Pipeline orchestration configuration.
+
+| Key | Type | Default | Range | Env var | Description |
+|---|---|---|---|---|---|
+| `latency_budget_ms` | float | `500.0` | ≥ 100.0 | `SPEECHSHIELD_LATENCY_BUDGET` | Target end-to-end latency budget |
+| `default_rewrite_strictness` | float | `1.0` | ≥ 0.5, ≤ 2.0 | `SPEECHSHIELD_STRICTNESS` | Default rewrite strictness (1.0 = normal) |
+| `latency_window_size` | int | `100` | ≥ 10 | `SPEECHSHIELD_LATENCY_WINDOW` | Number of passes to track for latency averaging |
+| `graceful_shutdown_timeout` | float | `10.0` | ≥ 1.0 | `SPEECHSHIELD_SHUTDOWN_TIMEOUT` | Seconds to wait for graceful agent shutdown |
+| `subscriber_queue_size` | int | `256` | ≥ 8 |  | Per-agent inbox size on the event bus (oldest events dropped when full) |
+| `max_agent_restarts` | int | `5` | ≥ 0 | `SPEECHSHIELD_MAX_AGENT_RESTARTS` | Times the supervisor restarts a crashed agent before giving up |
+| `restart_backoff_seconds` | float | `1.0` | ≥ 0.1 |  | Initial restart back-off (doubles each time, capped at 30s) |
+
+## `logging`
+
+Logging configuration.
+
+| Key | Type | Default | Range | Env var | Description |
+|---|---|---|---|---|---|
+| `level` | `DEBUG` \| `INFO` \| `WARNING` \| `ERROR` \| `CRITICAL` | `INFO` |  | `SPEECHSHIELD_LOG_LEVEL` | Logging level |
+| `log_dir` | str | `logs/` |  | `SPEECHSHIELD_LOG_DIR` | Directory for log files |
+| `format` | `text` \| `json` | `text` |  | `SPEECHSHIELD_LOG_FORMAT` | Log format (text or JSON for structured logging) |
+| `enable_file_logging` | bool | `True` |  | `SPEECHSHIELD_FILE_LOGGING` | Write logs to files |
+
+## `dashboard`
+
+Streamlit dashboard configuration.
+
+| Key | Type | Default | Range | Env var | Description |
+|---|---|---|---|---|---|
+| `enabled` | bool | `True` |  | `SPEECHSHIELD_DASHBOARD_ENABLED` | Enable dashboard |
+| `port` | int | `8501` | ≥ 1024, ≤ 65535 | `SPEECHSHIELD_DASHBOARD_PORT` | Dashboard port |
+| `refresh_interval` | float | `1.0` | ≥ 0.1 | `SPEECHSHIELD_DASHBOARD_REFRESH` | Dashboard refresh interval (seconds) |
+| `max_rows` | int | `500` | ≥ 10 | `SPEECHSHIELD_DASHBOARD_MAX_ROWS` | Max dashboard feed rows to keep |
+
+## `server`
+
+HTTP server: Prometheus metrics, health probes and the moderation API.
+
+| Key | Type | Default | Range | Env var | Description |
+|---|---|---|---|---|---|
+| `enabled` | bool | `True` |  | `SPEECHSHIELD_SERVER_ENABLED` | Run the HTTP server |
+| `host` | str | `127.0.0.1` |  | `SPEECHSHIELD_SERVER_HOST` | Bind address (use 0.0.0.0 inside containers) |
+| `port` | int | `9501` | ≥ 1024, ≤ 65535 | `SPEECHSHIELD_SERVER_PORT` | HTTP port |
+| `api_key` | str \| null | `null` |  | `SPEECHSHIELD_API_KEY` | If set, /v1/* endpoints require 'Authorization: Bearer <key>' |
+| `max_text_length` | int | `2000` | ≥ 1 |  | Reject moderation requests longer than this |
+| `rate_limit_per_minute` | int | `120` | ≥ 0 | `SPEECHSHIELD_RATE_LIMIT` | Per-client moderation API requests per minute (0 = unlimited) |
+
+## `interceptor`
+
+Inline audio censor configuration. When enabled, SpeechShield intercepts call audio via a virtual audio device (e.g. VB-Cable), holds each utterance until the pipeline has judged it, and plays it to the user's real headphones — with toxic words bleeped/muted, or the whole utterance replaced by a polite TTS rewrite.
+
+| Key | Type | Default | Range | Env var | Description |
+|---|---|---|---|---|---|
+| `enabled` | bool | `False` |  | `SPEECHSHIELD_INTERCEPTOR_ENABLED` | Enable inline audio interception mode |
+| `delay_seconds` | float | `0.8` | ≥ 0.2, ≤ 5.0 | `SPEECHSHIELD_INTERCEPTOR_DELAY` | Minimum delay applied to all audio (smooths playback) |
+| `max_hold_seconds` | float | `4.0` | ≥ 0.5, ≤ 30.0 | `SPEECHSHIELD_INTERCEPTOR_MAX_HOLD` | How long after an utterance ends to wait for its verdict before fail_mode applies |
+| `input_device_name` | str | `CABLE Output` |  | `SPEECHSHIELD_INTERCEPTOR_INPUT_DEVICE` | Virtual audio input device name (e.g. VB-Cable Output) |
+| `output_device_name` | str | `` |  | `SPEECHSHIELD_INTERCEPTOR_OUTPUT_DEVICE` | Real audio output device name (empty = system default) |
+| `censor_mode` | `bleep` \| `mute` \| `voice_clone` \| `tts` | `bleep` |  | `SPEECHSHIELD_CENSOR_MODE` | bleep/mute = keep the real voice and censor only toxic words; voice_clone = replace each toxic word with a polite one spoken in the speaker's own (cloned) voice; tts = replace the whole toxic utterance with the polite rewrite |
+| `streaming` | `auto` \| `on` \| `off` | `auto` |  | `SPEECHSHIELD_STREAMING` | Release audio word-by-word as it is confirmed clean, while the speaker is still talking (auto = on when ASR runs on a GPU). Not used by censor_mode=tts, which needs whole sentences. |
+| `partial_interval_seconds` | float | `0.5` | ≥ 0.2, ≤ 3.0 | `SPEECHSHIELD_PARTIAL_INTERVAL` | Streaming: how much new audio triggers another transcription pass |
+| `commit_guard_seconds` | float | `0.3` | ≥ 0.0, ≤ 2.0 | `SPEECHSHIELD_COMMIT_GUARD` | Streaming: never commit words ending this close to the live edge (they may still change) |
+| `clone_timeout_seconds` | float | `2.0` | ≥ 0.2, ≤ 10.0 | `SPEECHSHIELD_CLONE_TIMEOUT` | voice_clone: how long a toxic word may wait for its cloned replacement before it is bleeped |
+| `fail_mode` | `closed` \| `open` | `closed` |  | `SPEECHSHIELD_FAIL_MODE` | If no verdict arrives in time: closed = mute the utterance, open = let it through |
+| `word_padding_ms` | int | `60` | ≥ 0, ≤ 500 |  | Extra audio censored either side of a toxic word |
+| `bleep_frequency_hz` | float | `1000.0` | ≥ 100.0, ≤ 4000.0 |  | Bleep tone frequency |
+| `bleep_volume` | float | `0.15` | ≥ 0.0, ≤ 1.0 |  | Bleep loudness (0-1 of full scale) |
+
+## `diarization`
+
+Streaming speaker identification.
+
+| Key | Type | Default | Range | Env var | Description |
+|---|---|---|---|---|---|
+| `enabled` | bool | `False` |  | `SPEECHSHIELD_DIARIZATION_ENABLED` | Identify speakers (needs pyannote.audio and a HuggingFace token) |
+| `embedding_model` | str | `pyannote/wespeaker-voxceleb-resnet34-LM` |  |  | Speaker-embedding model |
+| `hf_token` | str \| null | `null` |  | `HF_TOKEN` | HuggingFace token for gated pyannote models (prefer HF_TOKEN env var) |
+| `similarity_threshold` | float | `0.5` | ≥ 0.0, ≤ 1.0 | `SPEECHSHIELD_DIARIZATION_THRESHOLD` | Cosine similarity needed to match an existing speaker |
+| `max_speakers` | int | `8` | ≥ 1 |  | Cap on distinct speakers tracked per session |
+| `min_segment_seconds` | float | `0.8` | ≥ 0.1 |  | Utterances shorter than this reuse the previous speaker |
+
+## `voice_clone`
+
+Voice-clone worker (isolated process, its own venv; see VOICE_CLONE.md).
+
+| Key | Type | Default | Range | Env var | Description |
+|---|---|---|---|---|---|
+| `python` | str | `.venv-voice/Scripts/python.exe` |  | `SPEECHSHIELD_VOICE_PYTHON` | Interpreter of the voice-clone venv (relative to the project root) |
+| `host` | str | `127.0.0.1` |  |  | Worker bind address |
+| `port` | int | `9502` | ≥ 1024, ≤ 65535 | `SPEECHSHIELD_VOICE_PORT` | Worker port |
+| `autostart` | bool | `True` |  |  | Launch the worker automatically when censor_mode=voice_clone |
+| `model` | `turbo` \| `standard` | `turbo` |  | `SPEECHSHIELD_VOICE_MODEL` | Chatterbox variant: turbo (fast) or standard (slower, more expressive) |
+| `device` | str | `cuda` |  | `SPEECHSHIELD_VOICE_DEVICE` | cuda or cpu |
+| `min_reference_seconds` | float | `6.0` | ≥ 5.0 |  | Clean speech needed from a speaker before their voice can be cloned |
+| `max_reference_seconds` | float | `15.0` | ≥ 5.0, ≤ 60.0 |  | Reference audio kept per speaker (most recent clean speech) |
+| `request_timeout_seconds` | float | `8.0` | ≥ 0.5 |  | Per-synthesis HTTP timeout |
+
+## Top level
+
+| Key | Default | Env var |
+|---|---|---|
+| `env` | `dev` | `SPEECHSHIELD_ENV` |
+| `debug` | `False` | `SPEECHSHIELD_DEBUG` |
