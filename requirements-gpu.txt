@@ -1,0 +1,6 @@
+# Optional: NVIDIA GPU acceleration for Whisper (10-12x faster ASR).
+# CUDA runtime libraries as pip wheels — no system CUDA toolkit needed.
+# Requires an NVIDIA driver supporting CUDA 12 (driver >= 525).
+-r requirements.txt
+nvidia-cublas-cu12
+nvidia-cudnn-cu12==9.*

@@ -3,6 +3,7 @@ audio/*.mp3
 
 # ---------- Python / venv ----------
 venv/
+.venv/
 __pycache__/
 *.py[cod]
 *.pyo
@@ -17,6 +18,9 @@ models/
 # ---------- Logs ----------
 logs/
 
+# ---------- Secrets ----------
+.env
+
 # ---------- IDE ----------
 .vscode/
 .idea/
@@ -28,5 +32,15 @@ Thumbs.db
 Desktop.ini
 .DS_Store
 
-# ---------- Pytest ----------
+# ---------- Tooling caches ----------
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Voice-clone worker venv
+.venv-*/
+demo_output/
+.playwright-mcp/

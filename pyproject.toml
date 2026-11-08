@@ -1,0 +1,49 @@
+[project]
+name = "speechshield"
+version = "2.1.0"
+description = "Real-time AI voice moderation: filters toxic speech before you hear it."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+[tool.ruff]
+line-length = 140
+target-version = "py311"
+extend-exclude = ["venv", "models", "logs", "audio"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "ASYNC"]
+ignore = [
+    "E501",   # long log/format lines are fine; the formatter is not enforced
+    "B008",   # FastAPI's Depends() in defaults is idiomatic
+    "ASYNC109", # explicit `timeout` parameters are part of our public API
+    "ASYNC220", # Popen returns immediately; we only wait on it during shutdown
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011", "ASYNC110"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+check_untyped_defs = false
+warn_unused_ignores = false
+no_implicit_optional = true
+exclude = ["venv/", "models/", "build/"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+markers = [
+    "slow: loads ML models / needs network (deselect with '-m \"not slow\"')",
+]
+
+[tool.coverage.run]
+source = ["agents", "core", "config"]
+omit = ["core/doctor.py", "core/audio_io.py"]  # hardware/environment probes
+
+[tool.coverage.report]
+skip_covered = true
+show_missing = true
+exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "raise NotImplementedError"]

@@ -1,0 +1,6 @@
+# Optional: streaming speaker identification (diarization.enabled: true)
+# The default embedding model may require accepting its terms on
+# huggingface.co and setting HF_TOKEN.
+-r requirements.txt
+torchaudio>=2.2.0
+pyannote.audio>=3.1.1

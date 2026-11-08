@@ -1,49 +1,43 @@
-# SpeechShield Agentic — Python dependencies
+# SpeechShield — runtime dependencies
 # Install with:  pip install -r requirements.txt
+# Optional:      pip install -r requirements-diarization.txt   (speaker identification)
+# Development:   pip install -r requirements-dev.txt
 
-# Audio I/O
+# Audio I/O (needs PortAudio; Linux: apt install portaudio19-dev)
 PyAudio>=0.2.14
 
-# ASR — Faster-Whisper (CPU)
+# ASR — Faster-Whisper (CTranslate2; CPU int8 or CUDA float16)
 faster-whisper>=1.0.0
 
 # Toxicity detection
 transformers>=4.38.0
 torch>=2.2.0
-torchaudio>=2.2.0
 
-# Text-to-Speech — Edge TTS (async, no model download, Python 3.12 compatible)
-edge-tts>=6.1.0
+# Text-to-Speech — Edge TTS. Microsoft rotates the endpoint's auth scheme;
+# older releases fail with HTTP 403, so keep this current.
+edge-tts>=7.3.1
 
-# Playback (optional — decodes MP3 for PyAudio output)
+# MP3 -> PCM decoding for TTS output (needs ffmpeg on PATH)
 pydub>=0.25.1
 
-# LLM rewrite (Ollama HTTP client)
+# LLM rewrite (Ollama / OpenAI-compatible HTTP client)
 httpx>=0.27.0
 
 # Dashboard
-streamlit>=1.32.0
+streamlit>=1.37.0
 pandas>=2.2.0
 
-# Testing
-pytest>=8.0.0
-pytest-asyncio>=0.23.0
-
-# Configuration Management
+# Configuration
 pydantic>=2.0.0
 PyYAML>=6.0
 
-# Observability — Structured Logging & Metrics
+# Observability
 structlog>=24.1.0
 prometheus_client>=0.19.0
 
-# Metrics Server
+# HTTP server (metrics, health, moderation API)
 fastapi>=0.104.0
 uvicorn>=0.24.0
 
-# Utilities
-numpy==1.26.4
-matplotlib==3.8.4
-
-# Diarization
-pyannote.audio>=3.1.1
+# Numerics
+numpy>=1.26,<2.0
