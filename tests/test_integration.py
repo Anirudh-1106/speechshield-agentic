@@ -12,6 +12,7 @@ import asyncio
 import pytest
 from core.event_bus import EventBus, Event
 from core.state import GlobalState
+from config.settings import Settings
 from agents.toxicity_agent import ToxicityAgent
 from agents.rewrite_agent import RewriteAgent
 
@@ -24,7 +25,11 @@ class TestPipelineIntegration:
     def setup_pipeline(self):
         """Create bus, state, and agents."""
         bus = EventBus()
-        state = GlobalState()
+        # Real toxic-bert, rules-only rewriting: an external LLM's cold-start
+        # time would make this flaky (the LLM path has its own mocked tests).
+        settings = Settings()
+        settings = settings.model_copy(update={"rewrite": settings.rewrite.model_copy(update={"llm_provider": "local"})})
+        state = GlobalState(settings=settings)
         toxicity_agent = ToxicityAgent(bus, state)
         rewrite_agent = RewriteAgent(bus, state)
         return bus, state, toxicity_agent, rewrite_agent

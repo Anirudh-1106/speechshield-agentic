@@ -9,14 +9,9 @@ Tests cover:
   • Environment profiles (dev/prod)
 """
 
-import os
-import tempfile
-from pathlib import Path
 import pytest
 from config.settings import (
-    Settings,
     load_config,
-    reload_settings,
     _deep_merge,
 )
 
@@ -79,6 +74,46 @@ class TestEnvironmentVariableOverrides:
         with pytest.raises(ValueError):
             load_config(env="dev")
 
+    def test_numeric_strings_keep_their_field_type(self, monkeypatch):
+        """'0' must stay device index 0 (not False); a numeric API key stays a string."""
+        monkeypatch.setenv("SPEECHSHIELD_INPUT_DEVICE", "0")
+        monkeypatch.setenv("SPEECHSHIELD_API_KEY", "123456")
+        config = load_config(env="dev")
+        assert config.audio.input_device == 0 and config.audio.input_device is not False
+        assert config.server.api_key == "123456"
+
+    def test_null_env_value(self, monkeypatch):
+        monkeypatch.setenv("SPEECHSHIELD_INPUT_DEVICE", "null")
+        assert load_config(env="dev").audio.input_device is None
+
+    def test_new_sections_overridable(self, monkeypatch):
+        monkeypatch.setenv("SPEECHSHIELD_CENSOR_MODE", "tts")
+        monkeypatch.setenv("SPEECHSHIELD_FAIL_MODE", "open")
+        monkeypatch.setenv("SPEECHSHIELD_DIARIZATION_ENABLED", "true")
+        monkeypatch.setenv("HF_TOKEN", "hf_x")
+        monkeypatch.setenv("SPEECHSHIELD_SERVER_PORT", "9999")
+        config = load_config(env="dev")
+        assert config.interceptor.censor_mode == "tts"
+        assert config.interceptor.fail_mode == "open"
+        assert config.diarization.enabled is True
+        assert config.diarization.hf_token == "hf_x"
+        assert config.server.port == 9999
+
+    def test_invalid_censor_mode_rejected(self, monkeypatch):
+        monkeypatch.setenv("SPEECHSHIELD_CENSOR_MODE", "scream")
+        with pytest.raises(ValueError):
+            load_config(env="dev")
+
+    def test_every_env_var_maps_to_a_real_field(self):
+        """Guard against typos in the env mapping."""
+        from config.settings import ENV_MAPPING, Settings
+
+        for var, path in ENV_MAPPING.items():
+            model = Settings
+            for key in path[:-1]:
+                model = model.model_fields[key].annotation
+            assert path[-1] in model.model_fields, f"{var} -> {path}"
+
 
 class TestConfigStructure:
     """Test configuration structure and defaults."""
@@ -94,7 +129,7 @@ class TestConfigStructure:
     def test_asr_settings(self):
         """Test ASR settings structure."""
         config = load_config(env="dev")
-        assert config.asr.model_size in ("tiny", "base", "small", "medium", "large")
+        assert config.asr.model_size.split(".")[0].removeprefix("distil-") in ("auto", "tiny", "base", "small", "medium", "large")
         assert config.asr.timeout_seconds > 0
 
     def test_toxicity_settings(self):

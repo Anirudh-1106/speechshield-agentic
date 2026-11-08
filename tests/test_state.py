@@ -3,7 +3,6 @@ Tests for core.state — GlobalState, SpeakerProfile, DashboardRow.
 """
 
 import time
-import pytest
 from core.state import GlobalState, SpeakerProfile, LatencyRecord, DashboardRow
 
 

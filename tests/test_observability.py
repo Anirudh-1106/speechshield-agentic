@@ -10,7 +10,6 @@ Tests cover:
 """
 
 import pytest
-import asyncio
 from core.logging import (
     configure_logging,
     get_logger,
@@ -18,8 +17,8 @@ from core.logging import (
     get_correlation_id,
     clear_correlation_id,
 )
-from core.metrics import Metrics, metrics, reset_metrics
-from core.health import HealthStatus, ComponentHealth, HealthChecks, health_checks, reset_health_checks
+from core.metrics import metrics, reset_metrics
+from core.health import HealthStatus, ComponentHealth, health_checks, reset_health_checks
 from core.event_bus import Event
 
 
@@ -182,7 +181,7 @@ class TestHealthChecks:
     def test_component_health_status_transitions(self):
         """Test component status transitions."""
         reset_health_checks()
-        hc = health_checks()
+        health_checks()
 
         comp = ComponentHealth("TestComponent")
         assert comp.status == HealthStatus.UNKNOWN

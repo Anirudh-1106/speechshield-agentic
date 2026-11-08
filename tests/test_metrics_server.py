@@ -14,7 +14,6 @@ from fastapi.testclient import TestClient
 from core.metrics_server import create_metrics_app
 from core.health import health_checks, reset_health_checks
 from core.metrics import metrics, reset_metrics
-import json
 
 
 @pytest.fixture
@@ -201,7 +200,7 @@ class TestReadinessEndpoint:
     def test_ready_endpoint_503_when_not_ready(self, client):
         """Test /ready returns 503 when system not ready."""
         reset_health_checks()
-        hc = health_checks()
+        health_checks()
         # Leave all as UNKNOWN (not ready)
 
         response = client.get("/ready")

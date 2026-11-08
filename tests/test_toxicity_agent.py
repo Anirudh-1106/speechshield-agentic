@@ -54,10 +54,21 @@ class TestSafePhraseWhitelist:
             "Thank you for your help",
             "Good morning everyone",
             "Hello there how are you",
+            # Prefix matching used to let these skip the classifier entirely:
+            "No you fucking idiot",
+            "Please shut the fuck up",
+            "Hi, you worthless piece of shit",
+            "his mother is a whore",
+            "ok whatever you retard",
         ],
     )
-    def test_safe_prefix_match(self, phrase: str) -> None:
-        assert _is_safe(phrase) is True, f"'{phrase}' starts with safe prefix"
+    def test_safe_prefix_does_not_bypass_classifier(self, phrase: str) -> None:
+        """Only whole-utterance matches skip the model; longer text is always classified."""
+        assert _is_safe(phrase) is False, f"'{phrase}' must go through the classifier"
+
+    @pytest.mark.parametrize("phrase", ["Thank you very much", "good game", "GG", "See you."])
+    def test_extra_safe_phrases(self, phrase: str) -> None:
+        assert _is_safe(phrase) is True
 
     @pytest.mark.parametrize(
         "phrase",

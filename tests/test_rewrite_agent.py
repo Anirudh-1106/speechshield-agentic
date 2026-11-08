@@ -77,6 +77,21 @@ class TestRewriteRules:
         result = RewriteAgent._rewrite("You  are  a  stupid  idiot")
         assert "  " not in result
 
+    @pytest.mark.parametrize(
+        "toxic_input,forbidden",
+        [
+            ("you f***ing idiot", "*"),
+            ("this is **** man", "*"),
+            ("shut up you motherfucker", "motherfuck"),
+            ("you fuckers are fuckin trash", "fuck"),
+            ("that is a shitload of work", "shit"),
+        ],
+    )
+    def test_variants_and_censored_tokens(self, toxic_input: str, forbidden: str) -> None:
+        result = RewriteAgent._rewrite(toxic_input)
+        assert forbidden not in result.lower(), result
+        assert "  " not in result
+
     def test_multiple_toxic_words_replaced(self) -> None:
         """Multiple toxic words in one sentence all get replaced."""
         result = RewriteAgent._rewrite("You're a stupid ugly moron")
@@ -94,8 +109,9 @@ class TestRewriteRuleCoverage:
             assert isinstance(replacement, str), f"Replacement not a string: {replacement}"
 
     def test_no_empty_replacements(self) -> None:
-        for pattern, replacement in _REWRITE_RULES:
-            assert len(replacement) > 0, f"Empty replacement for pattern: {pattern.pattern}"
+        """Only the rule that drops Whisper's self-censored tokens ("f***") may delete text."""
+        empty = [p.pattern for p, replacement in _REWRITE_RULES if not replacement]
+        assert len(empty) == 1 and r"\*" in empty[0], empty
 
     def test_rules_count_reasonable(self) -> None:
         """We should have a substantial rule set."""
