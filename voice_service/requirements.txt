@@ -1,0 +1,7 @@
+# Voice-clone worker dependencies (installed into .venv-voice, NOT the main venv:
+# Chatterbox pins torch 2.6, which conflicts with the main pipeline).
+# Install torch first from the CUDA index — see scripts/setup_voice_clone.ps1.
+chatterbox-tts==0.1.7
+fastapi>=0.104
+uvicorn>=0.24
+soundfile>=0.12
